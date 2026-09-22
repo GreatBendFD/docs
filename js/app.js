@@ -92,6 +92,7 @@ const fmt = s => s ? pd(s).toLocaleDateString(undefined, { month: 'short', day: 
 const plural = (n, a, b) => n === 1 ? a : (b || a + 's');
 const first = n => String(n || '').trim().split(/\s+/)[0] || '';
 const chip = (t, tone) => `<span class="chip${tone ? ' ' + tone : ''}">${esc(t)}</span>`;
+const sheet = (title, body, foot, sub) => `<div class="sheet-h"><div><h2>${title}</h2>${sub ? `<div class="muted sm">${sub}</div>` : ''}</div><button class="x" data-action="m-close" aria-label="Close">×</button></div><div class="sheet-b">${body}</div>${foot ? `<div class="sheet-f">${foot}</div>` : ''}`;
 
 async function copyText(v) {
   try { await navigator.clipboard.writeText(v); toast('Copied', 'ok'); return; } catch (e) {}
@@ -164,13 +165,16 @@ function tenure(j) {
 let sb = null, session = null;
 const S = {
   loading: true, error: '', fatal: '', me: null, access: null, priv: null, perms: {}, settings: { probation_months: 6 },
-  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true }, pushState: 'unsupported', pushError: ''
+  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true },
+  rigs: [], equipment: [], items: [], sessions: [], results: [], defs: [],
+  rigId: null, rsub: 'checks', eq: { q: '', where: 'all', cat: 'all', ret: false }, showArch: {}, showBase: {}, defShow: 'open', pushState: 'unsupported', pushError: ''
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
 
 function resetState() {
-  S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.mtab = 'roster'; S.q = ''; S.od = { none: true, soon: true }; S.error = ''; S.loading = false;
+  S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.mtab = 'roster'; S.q = ''; S.od = { none: true, soon: true }; S.error = '';
+  S.rigs = []; S.equipment = []; S.items = []; S.sessions = []; S.results = []; S.defs = []; S.rigId = null; S.rsub = 'checks'; S.eq = { q: '', where: 'all', cat: 'all', ret: false }; S.showArch = {}; S.showBase = {}; S.defShow = 'open'; S.loading = false;
   D = { latest: {}, memById: {} }; MS.length = 0;
 }
 
@@ -180,6 +184,22 @@ function derive() {
   for (const r of S.records) {
     const c = (D.latest[r.member_id] = D.latest[r.member_id] || {}), cur = c[r.requirement_id];
     if (!cur || (r.done_on || '') > (cur.done_on || '') || ((r.done_on || '') === (cur.done_on || '') && (r.created_at || '') > (cur.created_at || ''))) c[r.requirement_id] = r;
+  }
+  D.rigById = Object.fromEntries(S.rigs.map(r => [r.id, r]));
+  D.eqById = Object.fromEntries(S.equipment.map(e => [e.id, e]));
+  D.resBySession = {};
+  for (const r of S.results) (D.resBySession[r.session_id] = D.resBySession[r.session_id] || []).push(r);
+  // last time each checklist item was checked, per rig (base items are shared across rigs, so key by rig+item)
+  D.lastDone = {};
+  const sessByRig = {};
+  for (const s of S.sessions) (sessByRig[s.rig_id || 'station'] = sessByRig[s.rig_id || 'station'] || []).push(s);
+  for (const rigKey in sessByRig) {
+    const sess = sessByRig[rigKey].slice().sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.created_at || '').localeCompare(b.created_at || ''));
+    for (const s of sess) for (const r of (D.resBySession[s.id] || [])) {
+      if (!r.item_id) continue;
+      D.lastDone[r.item_id + '|' + rigKey] = { date: s.date, status: r.status };
+      D.lastDone[r.item_id] = { date: s.date, status: r.status };  // equipment items aren't shared, so the plain key is enough for them
+    }
   }
 }
 
@@ -268,6 +288,7 @@ function homeView() {
       ${p.nys_id ? `<div class="sm muted" style="margin-top:6px">NYS training ID: <b style="color:var(--ink)">${esc(p.nys_id)}</b></div>` : ''}</div></div>
     <div class="sec" style="margin-top:0"><h3>My requirements</h3></div>
     <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${m.category ? 'Nothing is required for ' + esc(m.category) + ' members yet.' : 'No category is set on your record yet.'}</div>`}</div>
+    ${homeAppStatus()}
     <p class="muted sm" style="margin-top:18px">Signed in as ${esc(session.user.email)}. Role: ${esc(roleLabel())}.</p>`;
 }
 const saveBtn = (formId, label) => `<button class="btn primary" type="submit" form="${formId}">${label || 'Save'}</button>`;
@@ -572,13 +593,470 @@ function msgsView() {
     }).join('') : '<div class="card empty">No messages yet. Post one and it appears at the top of everyone\u2019s home page.</div>'}</div>`;
 }
 
+/* ---------- apparatus, equipment, checks and deficiencies ---------- */
+const FREQS = [
+  { k: 'daily', label: 'Daily', days: 1 }, { k: 'weekly', label: 'Weekly', days: 7 }, { k: 'monthly', label: 'Monthly', days: 30 },
+  { k: 'quarterly', label: 'Quarterly', days: 91 }, { k: 'semiannual', label: 'Every 6 months', days: 182 }, { k: 'annual', label: 'Annually', days: 365 },
+  { k: 'use', label: 'After each use', days: 0 }, { k: 'custom', label: 'Custom (days)', days: null }
+];
+const freqDays = it => it.freq === 'custom' ? (Number(it.days) || 7) : (FREQS.find(f => f.k === it.freq) || FREQS[1]).days;
+const freqLabel = it => it.freq === 'custom' ? ('Every ' + (Number(it.days) || 7) + ' days') : (FREQS.find(f => f.k === it.freq) || FREQS[1]).label;
+const STATUS = [['ok', 'OK'], ['low', 'Low'], ['needs_repair', 'Needs repair'], ['dirty', 'Dirty'], ['needs_replacing', 'Needs replacing'], ['missing', 'Missing']];
+const SL = Object.fromEntries(STATUS);
+const stTone = s => s === 'ok' ? 'ok' : (s === 'low' || s === 'dirty') ? 'warn' : 'bad';
+const EQ_CATS = ['SCBA pack', 'SCBA cylinder', 'SCBA facepiece', 'Hose', 'Ladder', 'Hand tool', 'Power tool', 'Extrication', 'Medical / EMS', 'Radio / electronics', 'Lighting', 'Water rescue', 'Pump / hydraulics', 'PPE', 'Other'];
+const rigName = id => { const r = D.rigById[id]; return r ? r.unit : 'Station'; };
+const whereLabel2 = e => e.assigned_type === 'station' ? 'Station' : rigName(e.assigned_rig_id);
+const itemDueKey = (it, rigKey) => it.scope_type === 'base' ? (it.id + '|' + rigKey) : it.id;
+function dueInfo(it, rigKey) {
+  const days = freqDays(it); if (days === 0) return { state: 'use' };
+  const ld = D.lastDone[itemDueKey(it, rigKey)];
+  if (!ld) return { state: 'never' };
+  const due = addDays(ld.date, days), diff = diffDays(today(), due);
+  return { state: diff <= 0 ? 'due' : 'ok', due, diff, last: ld.date, s: ld.status };
+}
+const isDue = (it, rigKey) => { const s = dueInfo(it, rigKey).state; return s === 'due' || s === 'never'; };
+function dueChip(it, rigKey) {
+  const d = dueInfo(it, rigKey);
+  if (d.state === 'use') return chip('After each use');
+  if (d.state === 'never') return chip('Not checked yet', 'warn');
+  if (d.state === 'due') return d.diff < 0 ? chip(`Overdue ${-d.diff} ${plural(-d.diff, 'day')}`, 'bad') : chip('Due today', 'warn');
+  return chip('Next ' + fmt(d.due), 'ok');
+}
+function rigItems(rigId) {
+  const rig = D.rigById[rigId];
+  const ex = (rig && rig.excluded) || [];
+  const base = rigId === 'station' ? [] : S.items.filter(i => i.scope_type === 'base' && i.active !== false && !ex.includes(i.id)).sort((a, b) => (a.sort || 0) - (b.sort || 0));
+  const own = rigId === 'station' ? [] : S.items.filter(i => i.scope_type === 'rig' && i.rig_id === rigId && i.active !== false).sort((a, b) => (a.sort || 0) - (b.sort || 0));
+  const eqs = S.equipment.filter(e => (rigId === 'station' ? e.assigned_type === 'station' : e.assigned_type === 'rig' && e.assigned_rig_id === rigId) && e.status !== 'retired');
+  const eq = [];
+  for (const e of eqs) for (const it of S.items.filter(i => i.scope_type === 'equipment' && i.equipment_id === e.id && i.active !== false).sort((a, b) => (a.sort || 0) - (b.sort || 0))) eq.push(it);
+  return { base, own, eq };
+}
+const rigFlat = id => { const o = rigItems(id); return [...o.base, ...o.own, ...o.eq]; };
+function apparatusAttention() {
+  const out = [];
+  for (const r of S.rigs.filter(r => !r.archived).sort((a, b) => (a.sort || 0) - (b.sort || 0))) {
+    if (r.status === 'out_of_service') out.push({ tone: 'bad', text: `${r.unit} is out of service${r.oos_reason ? ': ' + r.oos_reason : ''}`, tab: 'rigs', rig: r.id });
+  }
+  const openDefs = S.defs.filter(d => !d.closed).length;
+  if (openDefs) out.push({ tone: 'warn', text: `${openDefs} open ${plural(openDefs, 'deficiency', 'deficiencies')}`, tab: 'rigs' });
+  return out;
+}
+function homeAppStatus() {
+  if (!S.perms.view_apparatus) return '';
+  const at = apparatusAttention();
+  return `<div class="sec"><h3>Department status</h3></div><div class="attn">${at.length ? at.slice(0, 10).map(a => `<button class="${a.tone}" data-action="goto-rigs" data-rig="${esc(a.rig || '')}">${esc(a.text)}</button>`).join('') : '<button class="ok" tabindex="-1">Everything is current.</button>'}</div>`;
+}
+
+/* ---------- apparatus list + detail ---------- */
+function rigCard(r) {
+  const due = rigFlat(r.id).filter(it => isDue(it, r.id)).length;
+  const defs = S.defs.filter(d => !d.closed && d.rig_id === r.id).length;
+  const oos = r.status === 'out_of_service';
+  return `<div class="card rigcard ${oos || defs ? 'tone-bad' : due ? 'tone-warn' : ''}">
+    <button class="rc-open" data-action="rig-open" data-id="${esc(r.id)}">${plate(r.unit)}<span class="rc-info"><span class="cap">${esc(r.type || 'Apparatus')}</span><span class="muted sm">${r.captain ? 'Captain ' + esc(r.captain) : 'No captain assigned'}</span><span class="rc-chips">${oos ? chip('Out of service', 'bad') : due ? chip(`${due} ${plural(due, 'check')} due`, 'warn') : chip('Checks current', 'ok')}${defs ? chip(`${defs} open ${plural(defs, 'deficiency', 'deficiencies')}`, 'bad') : ''}</span></span></button>
+    <div class="rc-foot">${S.perms.run_checks ? `<button class="btn primary sm" data-action="check-start" data-id="${esc(r.id)}">Start check</button>` : ''}</div></div>`;
+}
+function stationCard() {
+  const n = S.equipment.filter(e => e.assigned_type === 'station' && e.status !== 'retired').length;
+  const due = rigFlat('station').filter(it => isDue(it, 'station')).length;
+  return `<div class="card rigcard ${due ? 'tone-warn' : ''}"><button class="rc-open" data-action="rig-open" data-id="station">${plate('Station')}<span class="rc-info"><span class="cap">Station equipment</span><span class="muted sm">${n} ${plural(n, 'item')} assigned</span><span class="rc-chips">${due ? chip(`${due} ${plural(due, 'check')} due`, 'warn') : chip('Checks current', 'ok')}</span></span></button>
+    <div class="rc-foot">${S.perms.run_checks && due ? `<button class="btn primary sm" data-action="check-start" data-id="station">Start check</button>` : ''}</div></div>`;
+}
+const plate = (u, cls) => `<span class="plate${cls ? ' ' + cls : ''}">${esc(u)}</span>`;
+function rigsView() {
+  const rigs = S.rigs.filter(r => !r.archived).sort((a, b) => (a.sort || 0) - (b.sort || 0));
+  return `<div class="head-row"><h1>Apparatus</h1>${S.perms.edit_equipment ? '<button class="btn primary" data-action="rig-new">Add rig</button>' : ''}</div>
+    ${rigs.length ? '' : '<div class="card empty">No rigs yet.</div>'}
+    <div class="grid">${rigs.map(rigCard).join('')}${stationCard()}</div>`;
+}
+function itemRow(it, o) {
+  o = o || {};
+  const d = dueInfo(it, o.rigKey);
+  const last = d.last;
+  const meta = `${esc(freqLabel(it))}${last ? `, last done ${esc(fmt(last))}${d.s && d.s !== 'ok' ? ' (' + esc(SL[d.s]) + ')' : ''}` : ''}`;
+  return `<div class="li${o.off ? ' off' : ''}"><div class="t"><b>${esc(it.name)}</b><span class="muted sm">${meta}</span></div><div class="acts">${o.off ? chip('Not on this rig') : dueChip(it, o.rigKey)}${o.extra || ''}${o.edit ? `<button class="btn ghost sm" data-action="it-edit" data-id="${esc(it.id)}">Edit</button><button class="btn ghost sm" data-action="it-arch" data-id="${esc(it.id)}">Archive</button>` : ''}</div></div>`;
+}
+function rigDetail(id) {
+  const r = id === 'station' ? { id: 'station', unit: 'Station', isStation: true } : D.rigById[id];
+  if (!r) return `<div class="wrap"><div class="card empty">This rig no longer exists.</div></div>`;
+  const subs = [['checks', 'Checks'], ['equipment', 'Equipment'], ['deficiencies', 'Deficiencies']]; if (!r.isStation) subs.push(['details', 'Details']);
+  if (r.isStation && S.rsub === 'details') S.rsub = 'checks';
+  let body; if (S.rsub === 'equipment') body = rigEquipTab(r); else if (S.rsub === 'deficiencies') body = rigDefTab(r); else if (S.rsub === 'details') body = rigDetailsTab(r); else body = rigChecksTab(r);
+  const due = rigFlat(id).filter(it => isDue(it, id)).length;
+  return `<button class="back" data-action="rig-back">← All apparatus</button>
+    <div class="rig-head">${plate(r.unit, 'big')}<div class="txt"><h2>${esc(r.isStation ? 'Station equipment' : (r.type || 'Apparatus'))}</h2>${r.isStation ? '' : `<span class="muted">${r.captain ? 'Captain ' + esc(r.captain) : 'No captain assigned'}</span>`}<span class="rc-chips">${!r.isStation ? (r.status === 'out_of_service' ? chip('Out of service', 'bad') : chip('In service', 'ok')) : ''}${due ? chip(`${due} ${plural(due, 'check')} due`, 'warn') : ''}</span></div>
+      <div style="margin-left:auto">${S.perms.run_checks ? `<button class="btn primary" data-action="check-start" data-id="${esc(id)}">Start check</button>` : ''}</div></div>
+    <div class="subtabs">${subs.map(([k, l]) => `<button data-action="rsub" data-sub="${k}"${S.rsub === k ? ' aria-current="page"' : ''}>${l}</button>`).join('')}</div>
+    ${body}`;
+}
+function checklistBlock(title, items, opts) {
+  opts = opts || {};
+  const key = (opts.scope || '') + ':' + (opts.rigId || opts.eqId || '');
+  const archived = S.showArch[key] ? S.items.filter(i => i.scope_type === opts.scope && (opts.scope === 'base' || (opts.scope === 'rig' ? i.rig_id === opts.rigId : i.equipment_id === opts.eqId)) && i.active === false) : [];
+  const nArch = S.items.filter(i => i.scope_type === opts.scope && (opts.scope === 'base' || (opts.scope === 'rig' ? i.rig_id === opts.rigId : i.equipment_id === opts.eqId)) && i.active === false).length;
+  return `<div class="card" style="margin-bottom:14px"><div class="grp spread"><span>${esc(title)}</span>${opts.canAdd ? `<button class="btn sm" data-action="it-new" data-scope="${opts.scope}" data-rig="${esc(opts.rigId || '')}" data-eq="${esc(opts.eqId || '')}">Add check</button>` : ''}</div>
+    <div class="list">${items.length ? items.map(it => itemRow(it, { edit: opts.canEdit, rigKey: opts.rigKey })).join('') : '<div class="empty">No checks yet.</div>'}</div>
+    ${nArch ? `<div class="pad"><button class="btn ghost sm" data-action="it-showarch" data-key="${esc(key)}">${S.showArch[key] ? 'Hide' : 'Show'} ${nArch} archived</button></div>` : ''}
+    ${archived.map(it => `<div class="li off"><div class="t"><b>${esc(it.name)}</b><span class="muted sm">Archived</span></div>${opts.canEdit ? `<button class="btn sm" data-action="it-restore" data-id="${esc(it.id)}">Restore</button>` : ''}</div>`).join('')}</div>`;
+}
+function rigChecksTab(r) {
+  const o = rigItems(r.id); const all = [...o.base, ...o.own, ...o.eq]; const due = all.filter(it => isDue(it, r.id));
+  let h = `<div class="card pad spread" style="margin-bottom:14px"><div><b>${due.length ? `${due.length} of ${all.length} ${plural(all.length, 'check')} due` : 'All checks are current'}</b><div class="muted sm">Only checks that are due appear on the check sheet.</div></div>${S.perms.run_checks ? `<button class="btn primary" data-action="check-start" data-id="${esc(r.id)}">Start check</button>` : ''}</div>`;
+  if (!r.isStation) {
+    h += checklistBlock('Checks for this rig only', o.own, { canAdd: S.perms.edit_equipment, canEdit: S.perms.edit_equipment, scope: 'rig', rigId: r.id, rigKey: r.id });
+    if (o.eq.length) {
+      const byE = {}; for (const it of o.eq) (byE[it.equipment_id] = byE[it.equipment_id] || []).push(it);
+      h += `<div class="card" style="margin-bottom:14px"><div class="grp">Equipment checks on ${esc(r.unit)}</div><div class="list">${Object.keys(byE).map(eid => { const e = D.eqById[eid]; return `<div class="li" style="background:var(--surface-2)"><b>${esc(e ? e.name : 'Equipment')}</b></div>` + byE[eid].map(it => itemRow(it, { rigKey: eid })).join(''); }).join('')}</div><div class="pad muted sm">Edit these from the equipment record.</div></div>`;
+    }
+    const ex = r.excluded || []; const allBase = S.items.filter(i => i.scope_type === 'base' && i.active !== false).sort((a, b) => (a.sort || 0) - (b.sort || 0));
+    const nOn = allBase.filter(i => !ex.includes(i.id)).length;
+    h += `<div class="card" style="margin-bottom:14px"><div class="grp spread"><span>Base checklist, ${nOn} of ${allBase.length} apply here</span><span class="row">${S.perms.admin_setup ? `<button class="btn sm" data-action="it-new" data-scope="base">Add base check</button>` : ''}<button class="btn sm" data-action="base-toggle">${S.showBase[r.id] ? 'Hide' : 'Show'}</button></span></div>
+      ${S.showBase[r.id] ? `<div class="list">${allBase.map(it => { const off = ex.includes(it.id); return itemRow(it, { off, edit: S.perms.admin_setup, rigKey: r.id, extra: S.perms.edit_equipment ? `<label class="chk" style="min-height:36px"><input type="checkbox" data-change="it-excl" data-id="${esc(it.id)}" data-rig="${esc(r.id)}"${off ? '' : ' checked'}><span class="sm">Applies</span></label>` : '' }); }).join('')}</div>` : ''}</div>`;
+  } else {
+    h += `<div class="card pad muted">Checks for station equipment come from the equipment records.</div>`;
+  }
+  return h;
+}
+function eqCard(e) {
+  const items = S.items.filter(i => i.scope_type === 'equipment' && i.equipment_id === e.id && i.active !== false);
+  const due = items.filter(it => isDue(it, e.id)).length;
+  return `<button class="card eqcard${e.status === 'retired' ? ' retired' : ''}" data-action="eq-open" data-id="${esc(e.id)}">
+    <span class="top2"><b>${esc(e.name)}</b>${chip(whereLabel2(e))}</span>
+    <span class="muted sm">${esc([e.category, e.location].filter(Boolean).join(', ')) || '&nbsp;'}</span>
+    <span class="rc-chips">${e.status === 'retired' ? chip('Retired') : e.status === 'out_of_service' ? chip('Out of service', 'bad') : ''}${purchaseChip(e)}${due ? chip(`${due} ${plural(due, 'check')} due`, 'warn') : ''}</span></button>`;
+}
+function rigEquipTab(r) {
+  const list = S.equipment.filter(e => e.assigned_type === 'rig' && e.assigned_rig_id === r.id && e.status !== 'retired').sort((a, b) => a.name.localeCompare(b.name));
+  const tt = eqTotals(list);
+  return `<div class="head-row"><div><b>${list.length} ${plural(list.length, 'item')}</b> <span class="muted">worth ${money(tt.sum)} at purchase${totalsNote(tt)}</span></div>${S.perms.edit_equipment ? `<button class="btn primary" data-action="eq-new" data-assigned="${esc(r.id)}">Add equipment</button>` : ''}</div>
+    ${list.length ? `<div class="eqlist">${list.map(eqCard).join('')}</div>` : '<div class="card empty">No equipment is assigned here yet.</div>'}`;
+}
+function defCard(d) {
+  const r = d.rig_id ? D.rigById[d.rig_id] : null;
+  return `<div class="card pad stack" style="gap:8px"><div class="spread"><span class="row">${r ? plate(r.unit, 'sm') : ''}<b>${esc(d.item_name)}</b>${d.equipment_name ? `<span class="muted sm">${esc(d.equipment_name)}</span>` : ''}</span>${chip(SL[d.status] || d.status, stTone(d.status))}</div>
+    ${d.comment ? `<div>${esc(d.comment)}</div>` : ''}
+    <div class="muted sm">Found ${esc(fmt(d.found_date))}${d.found_by ? ' by ' + esc(d.found_by) : ''}. Reported to: ${esc(d.reported_to || 'not yet')}${d.date_reported ? ' on ' + esc(fmt(d.date_reported)) : ''}. ${d.closed ? 'Back in service ' + esc(fmt(d.back_date)) + '.' : 'Still open.'}${d.note ? ' ' + esc(d.note) : ''}</div>
+    ${S.perms.run_checks ? `<div class="row"><button class="btn sm" data-action="def-edit" data-id="${esc(d.id)}">Edit</button>${d.closed ? `<button class="btn sm" data-action="def-reopen" data-id="${esc(d.id)}">Reopen</button>` : `<button class="btn sm primary" data-action="def-close" data-id="${esc(d.id)}">Back in service</button>`}</div>` : ''}</div>`;
+}
+function rigDefTab(r) {
+  const list = S.defs.filter(d => d.rig_id === r.id).sort((a, b) => (b.found_date || '').localeCompare(a.found_date || ''));
+  return `<div class="stack">${list.length ? list.map(defCard).join('') : '<div class="card empty">No deficiencies logged.</div>'}</div>`;
+}
+function rigDetailsTab(r) {
+  const kv = (k, v) => `<dt>${k}</dt><dd>${v === '' || v == null ? '—' : esc(v)}</dd>`;
+  return `<div class="card pad"><dl class="kv">
+    ${kv('Unit', r.unit)}${kv('Type', r.type)}${kv('Captain', r.captain)}${kv('Year', r.year)}${kv('Make', r.make)}${kv('Model', r.model)}${kv('VIN', r.vin)}${kv('Plate', r.plate)}
+    ${kv('Purchase date', r.purchase_date ? fmt(r.purchase_date) : r.purchase_date_unknown ? 'Unknown' : '')}${kv('Purchase amount', r.purchase_amount != null ? money(r.purchase_amount) : r.purchase_amount_unknown ? 'Unknown' : '')}${kv('Estimated value', r.est_value != null ? money(r.est_value) : '')}
+    ${kv('Latest mileage or hours', r.meter ? r.meter + (r.meter_date ? ' (' + fmt(r.meter_date) + ')' : '') : '')}
+    ${kv('Status', r.status === 'out_of_service' ? 'Out of service' + (r.oos_reason ? ': ' + r.oos_reason : '') : 'In service')}${kv('Notes', r.notes)}</dl></div>
+  ${S.perms.edit_equipment ? `<div class="row" style="margin-top:14px"><button class="btn primary" data-action="rig-edit" data-id="${esc(r.id)}">Edit details</button><button class="btn ${r.status === 'out_of_service' ? '' : 'danger'}" data-action="rig-oos" data-id="${esc(r.id)}">${r.status === 'out_of_service' ? 'Return to service' : 'Mark out of service'}</button>${S.perms.admin_setup ? `<button class="btn" data-action="rig-arch" data-id="${esc(r.id)}">Archive rig</button>` : ''}</div>` : ''}`;
+}
+
+/* ---------- equipment list ---------- */
+const hasAmt = x => x.purchase_amount != null && x.purchase_amount !== '';
+const hasEst = x => x.est_value != null && x.est_value !== '';
+function purchaseChip(x) {
+  const d = x.purchase_date ? fmt(x.purchase_date) : x.purchase_date_unknown ? 'Date unknown' : null;
+  const a = hasAmt(x) ? money(x.purchase_amount) : hasEst(x) ? (x.purchase_amount_unknown ? 'Cost unknown, ' : '') + 'est. ' + money(x.est_value) : x.purchase_amount_unknown ? 'Cost unknown' : null;
+  if (d && a) return chip(d + ', ' + a);
+  if (!d && !a) return chip('No purchase info', 'warn');
+  return chip(d || a) + chip(d ? 'Cost needed' : 'Date needed', 'warn');
+}
+function eqTotals(list) { let sum = 0, estSum = 0, estN = 0, none = 0; for (const e of list) { if (hasAmt(e)) sum += Number(e.purchase_amount) || 0; else if (hasEst(e)) { estSum += Number(e.est_value) || 0; estN++; } else none++; } return { sum, estSum, estN, none }; }
+const totalsNote = t => (t.estN ? `, plus ${money(t.estSum)} estimated for ${t.estN} ${plural(t.estN, 'item')}` : '') + (t.none ? `, ${t.none} ${plural(t.none, 'item')} with no cost or estimate` : '');
+const money = n => (n === null || n === undefined || n === '') ? '—' : Number(n).toLocaleString(undefined, { style: 'currency', currency: 'USD' });
+function equipmentView() {
+  const f = S.eq, q = f.q.trim().toLowerCase();
+  const cats = [...new Set([...EQ_CATS, ...S.equipment.map(e => e.category).filter(Boolean)])].sort();
+  let list = S.equipment.filter(e => f.ret ? true : e.status !== 'retired');
+  if (f.where !== 'all') list = list.filter(e => (f.where === 'station' ? e.assigned_type === 'station' : e.assigned_rig_id === f.where));
+  if (f.cat !== 'all') list = list.filter(e => e.category === f.cat);
+  if (q) list = list.filter(e => [e.name, e.serial, e.category, e.location, e.make_model, e.notes].join(' ').toLowerCase().includes(q));
+  list.sort((a, b) => a.name.localeCompare(b.name));
+  const tt = eqTotals(list);
+  const whereOpts = [['all', 'All locations'], ['station', 'Station'], ...S.rigs.filter(r => !r.archived).sort((a, b) => (a.sort || 0) - (b.sort || 0)).map(r => [r.id, r.unit])];
+  return `<div class="head-row"><h1>Equipment</h1>${S.perms.edit_equipment ? '<button class="btn primary" data-action="eq-new">Add equipment</button>' : ''}</div>
+    <div class="filters">
+      <label class="f"><span>Search</span><input id="eq-q" type="search" value="${esc(f.q)}" placeholder="Name, serial number, category…"></label>
+      <label class="f"><span>Assigned to</span><select id="eq-where">${whereOpts.map(([v, l]) => `<option value="${v}"${f.where === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+      <label class="f"><span>Category</span><select id="eq-cat"><option value="all">All categories</option>${cats.map(c => `<option value="${esc(c)}"${f.cat === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+    </div>
+    <div class="spread" style="margin-bottom:12px"><span><span class="total">${list.length}</span> ${plural(list.length, 'item')}, <span class="total">${money(tt.sum)}</span> <span class="muted">at purchase${totalsNote(tt)}</span></span>
+      <label class="chk"><input type="checkbox" id="eq-ret"${f.ret ? ' checked' : ''}>Show retired</label></div>
+    <div id="eq-list">${eqList()}</div>`;
+}
+function eqList() {
+  const f = S.eq, q = f.q.trim().toLowerCase();
+  let list = S.equipment.filter(e => f.ret ? true : e.status !== 'retired');
+  if (f.where !== 'all') list = list.filter(e => (f.where === 'station' ? e.assigned_type === 'station' : e.assigned_rig_id === f.where));
+  if (f.cat !== 'all') list = list.filter(e => e.category === f.cat);
+  if (q) list = list.filter(e => [e.name, e.serial, e.category, e.location, e.make_model, e.notes].join(' ').toLowerCase().includes(q));
+  list.sort((a, b) => a.name.localeCompare(b.name));
+  return list.length ? `<div class="eqlist">${list.map(eqCard).join('')}</div>` : `<div class="card empty">${S.equipment.length ? 'Nothing matches those filters.' : 'No equipment yet.'}</div>`;
+}
+function eqDetailSheet(id) {
+  const e = D.eqById[id]; if (!e) return sheet('Equipment', '<div class="empty">This item no longer exists.</div>', '<button class="btn" data-action="m-close">Close</button>');
+  const its = S.items.filter(i => i.scope_type === 'equipment' && i.equipment_id === id && i.active !== false);
+  const kv = (k, v) => `<dt>${k}</dt><dd>${v === '' || v == null ? '—' : esc(v)}</dd>`;
+  const body = `<div class="rc-chips" style="margin-bottom:12px">${chip(whereLabel2(e))}${e.status === 'retired' ? chip('Retired', 'bad') : e.status === 'out_of_service' ? chip('Out of service', 'bad') : chip('In service', 'ok')}</div>
+   <div class="card pad"><dl class="kv">${kv('Category', e.category)}${kv('Location', e.location)}${kv('Serial number', e.serial)}${kv('Make and model', e.make_model)}${e.size ? kv('Size', e.size) : ''}${e.mfg_date ? kv('Manufactured', fmt(e.mfg_date)) : ''}${e.service_life_end ? kv('Service life ends', fmt(e.service_life_end)) : ''}
+     ${kv('Purchase date', e.purchase_date ? fmt(e.purchase_date) : e.purchase_date_unknown ? 'Unknown' : '')}${kv('Purchase amount', hasAmt(e) ? money(e.purchase_amount) : e.purchase_amount_unknown ? 'Unknown' : '')}${kv('Estimated value', hasEst(e) ? money(e.est_value) : '')}${kv('Purchased from', e.vendor)}${e.status === 'retired' ? kv('Retired', (e.retired_date ? fmt(e.retired_date) : '') + (e.retire_note ? ': ' + e.retire_note : '')) : ''}${kv('Notes', e.notes)}</dl></div>
+   <div class="sec spread"><h3>Checks</h3>${S.perms.edit_equipment && e.status !== 'retired' ? `<button class="btn sm" data-action="it-new" data-scope="equipment" data-eq="${esc(id)}">Add check</button>` : ''}</div>
+   <div class="card list">${its.length ? its.map(it => itemRow(it, { edit: e.status !== 'retired' && S.perms.edit_equipment, rigKey: id })).join('') : '<div class="empty">No recurring checks.</div>'}</div>`;
+  const foot = `<button class="btn" data-action="m-close">Close</button>${S.perms.edit_equipment ? (e.status === 'retired' ? `<button class="btn" data-action="eq-react" data-id="${esc(id)}">Return to service</button>` : `<button class="btn danger" data-action="eq-retire" data-id="${esc(id)}">Retire</button>`) + `<button class="btn primary" data-action="eq-edit" data-id="${esc(id)}">Edit</button>` : ''}`;
+  return sheet(esc(e.name), body, foot);
+}
+
+/* ---------- forms: rig, equipment, checklist item ---------- */
+const unkField = (label, name, val, unk, o) => { o = o || {}; return `<div class="f"><span>${label}</span><input name="${name}" value="${esc(val)}" type="${o.type || 'text'}"${o.step ? ` step="${o.step}"` : ''}${o.min != null ? ` min="${o.min}"` : ''}${unk ? ' disabled' : ''}><label class="chk" style="min-height:36px"><input type="checkbox" name="${name}_unknown" data-unk="${name}"${unk ? ' checked' : ''}><span class="sm">Unknown</span></label></div>`; };
+function unkMount(root) { root.querySelectorAll('input[data-unk]').forEach(cb => { const inp = root.querySelector('input[name="' + cb.dataset.unk + '"]'); if (!inp) return; cb.addEventListener('change', () => { inp.disabled = cb.checked; if (cb.checked) inp.value = ''; }); }); }
+function rigFormHtml(r) {
+  const x = r || {};
+  return `<div class="sheet-h"><div><h2>${r ? 'Edit rig' : 'Add rig'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-rig" class="form" data-id="${esc(x.id || '')}">
+      <label class="f"><span>Unit number</span><input name="unit" value="${esc(x.unit || '')}" required placeholder="24-1-1"></label>
+      <label class="f"><span>Type</span><input name="type" value="${esc(x.type || '')}" placeholder="Engine, tanker, rescue…"></label>
+      <label class="f"><span>Captain</span><input name="captain" value="${esc(x.captain || '')}"></label>
+      <div class="two"><label class="f"><span>Year</span><input name="year" type="number" value="${esc(x.year || '')}"></label><label class="f"><span>Make</span><input name="make" value="${esc(x.make || '')}"></label></div>
+      <label class="f"><span>Model</span><input name="model" value="${esc(x.model || '')}"></label>
+      <div class="two"><label class="f"><span>VIN</span><input name="vin" value="${esc(x.vin || '')}"></label><label class="f"><span>Plate</span><input name="plate" value="${esc(x.plate || '')}"></label></div>
+      <div class="two">${unkField('Purchase date', 'purchase_date', x.purchase_date, x.purchase_date_unknown, { type: 'date' })}${unkField('Purchase amount ($)', 'purchase_amount', x.purchase_amount, x.purchase_amount_unknown, { type: 'number', step: '0.01', min: 0 })}</div>
+      <label class="f"><span>Estimated value ($)</span><input name="est_value" type="number" step="0.01" min="0" value="${esc(x.est_value || '')}"></label>
+      <label class="f"><span>Notes</span><textarea name="notes">${esc(x.notes || '')}</textarea></label>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-rig')}</div>`;
+}
+async function saveRigForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null;
+  const unit = String(fd.get('unit') || '').trim(); if (!unit) { toast('Enter a unit number.', 'bad'); return; }
+  const num = v => v === '' || v == null ? null : Number(v);
+  const data = { unit, type: (fd.get('type') || '').trim(), captain: (fd.get('captain') || '').trim(), year: num(fd.get('year')), make: (fd.get('make') || '').trim(), model: (fd.get('model') || '').trim(), vin: (fd.get('vin') || '').trim(), plate: (fd.get('plate') || '').trim(),
+    purchase_date: fd.get('purchase_date') || null, purchase_date_unknown: !!fd.get('purchase_date_unknown') && !fd.get('purchase_date'),
+    purchase_amount: num(fd.get('purchase_amount')), purchase_amount_unknown: !!fd.get('purchase_amount_unknown') && num(fd.get('purchase_amount')) === null,
+    est_value: num(fd.get('est_value')), notes: (fd.get('notes') || '').trim() };
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    if (id) { const r = await sb.from('rigs').update(data).eq('id', id); if (r.error) throw r.error; }
+    else { const mx = Math.max(0, ...S.rigs.map(r => r.sort || 0)); const r = await sb.from('rigs').insert({ ...data, sort: mx + 10, status: 'in_service', excluded: [], archived: false }); if (r.error) throw r.error; }
+    MS.pop(); drawModal(); toast('Rig saved', 'ok'); loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+function eqFormHtml(e, assigned) {
+  const x = e || {};
+  const rigs = S.rigs.filter(r => !r.archived).sort((a, b) => (a.sort || 0) - (b.sort || 0));
+  const curAssign = x.id ? (x.assigned_type === 'station' ? 'station' : x.assigned_rig_id) : (assigned || 'station');
+  const cats = [...EQ_CATS, ...S.equipment.map(q => q.category).filter(Boolean)];
+  return `<div class="sheet-h"><div><h2>${e ? 'Edit equipment' : 'Add equipment'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-eq" class="form" data-id="${esc(x.id || '')}">
+      <label class="f"><span>Name</span><input name="name" value="${esc(x.name || '')}" placeholder="Positive pressure fan… (blank uses category and serial)"></label>
+      <div class="two"><label class="f"><span>Category</span><input name="category" list="dl-cat" value="${esc(x.category || '')}"></label><label class="f"><span>Assigned to</span><select name="assigned">${[['station', 'Station'], ...rigs.map(r => [r.id, r.unit])].map(([v, l]) => `<option value="${esc(v)}"${curAssign === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label></div>
+      <label class="f"><span>Location</span><input name="location" value="${esc(x.location || '')}" placeholder="Driver side compartment 2…"></label>
+      <div class="two"><label class="f"><span>Serial number</span><input name="serial" value="${esc(x.serial || '')}"></label><label class="f"><span>Make and model</span><input name="make_model" value="${esc(x.make_model || '')}"></label></div>
+      <div class="two" data-for="cylinder" hidden><label class="f"><span>Manufacture date</span><input name="mfg_date" type="date" value="${esc(x.mfg_date || '')}"></label><label class="f"><span>Service life ends</span><input name="service_life_end" type="date" value="${esc(x.service_life_end || '')}"></label></div>
+      <div data-for="facepiece" hidden><label class="f"><span>Size</span><input name="size" value="${esc(x.size || '')}"></label></div>
+      <div class="two">${unkField('Purchase date', 'purchase_date', x.purchase_date, x.purchase_date_unknown, { type: 'date' })}${unkField('Purchase amount ($)', 'purchase_amount', x.purchase_amount, x.purchase_amount_unknown, { type: 'number', step: '0.01', min: 0 })}</div>
+      <label class="f"><span>Estimated value ($)</span><input name="est_value" type="number" step="0.01" min="0" value="${esc(x.est_value || '')}"></label>
+      <label class="f"><span>Purchased from</span><input name="vendor" value="${esc(x.vendor || '')}"></label>
+      <label class="f"><span>Notes</span><textarea name="notes">${esc(x.notes || '')}</textarea></label>
+      <datalist id="dl-cat">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-eq')}</div>`;
+}
+function eqFormMount(root) {
+  unkMount(root);
+  const cat = root.querySelector('[name=category]'); if (!cat) return;
+  const apply = () => { const v = cat.value.toLowerCase(); root.querySelectorAll('[data-for]').forEach(n => { n.hidden = !v.includes(n.dataset.for); }); };
+  cat.addEventListener('input', apply); apply();
+}
+async function saveEqForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null;
+  let name = String(fd.get('name') || '').trim(); const serial = (fd.get('serial') || '').trim(), category = (fd.get('category') || '').trim();
+  if (!name && serial && category) name = category + ' ' + serial;
+  if (!name) { toast('Give it a name, or enter a category and serial number.', 'bad'); return; }
+  const num = v => v === '' || v == null ? null : Number(v);
+  const assignedVal = fd.get('assigned');
+  const data = { name, category, assigned_type: assignedVal === 'station' ? 'station' : 'rig', assigned_rig_id: assignedVal === 'station' ? null : assignedVal,
+    location: (fd.get('location') || '').trim(), serial, make_model: (fd.get('make_model') || '').trim(), mfg_date: fd.get('mfg_date') || null, service_life_end: fd.get('service_life_end') || null, size: (fd.get('size') || '').trim(),
+    purchase_date: fd.get('purchase_date') || null, purchase_date_unknown: !!fd.get('purchase_date_unknown') && !fd.get('purchase_date'),
+    purchase_amount: num(fd.get('purchase_amount')), purchase_amount_unknown: !!fd.get('purchase_amount_unknown') && num(fd.get('purchase_amount')) === null,
+    est_value: num(fd.get('est_value')), vendor: (fd.get('vendor') || '').trim(), notes: (fd.get('notes') || '').trim() };
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    if (id) { const r = await sb.from('equipment').update(data).eq('id', id); if (r.error) throw r.error; }
+    else { const r = await sb.from('equipment').insert({ ...data, status: 'in_service' }); if (r.error) throw r.error; }
+    MS.pop(); drawModal(); toast('Equipment saved', 'ok'); loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+function itemFormHtml(scope, rigId, eqId, it) {
+  const x = it || { freq: 'weekly', days: 7 };
+  const label = scope === 'base' ? 'the base checklist' : scope === 'rig' ? 'this rig' : 'this equipment';
+  return `<div class="sheet-h"><div><h2>${it ? 'Edit check' : 'Add check'}</h2><span class="muted sm">For ${label}</span></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-item" class="form" data-id="${esc(x.id || '')}" data-scope="${esc(scope)}" data-rig="${esc(rigId || '')}" data-eq="${esc(eqId || '')}">
+      <label class="f"><span>What to check</span><input name="name" value="${esc(x.name || '')}" required placeholder="Fuel (fill at 3/4)"></label>
+      <label class="f"><span>How often</span><select name="freq">${FREQS.map(f => `<option value="${f.k}"${(x.freq || 'weekly') === f.k ? ' selected' : ''}>${f.label}</option>`).join('')}</select></label>
+      <label class="f" data-days-wrap hidden><span>Every how many days?</span><input name="days" type="number" min="1" value="${esc(x.days || 7)}"></label>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-item')}</div>`;
+}
+function itemFormMount(root) { const sel = root.querySelector('[name=freq]'), w = root.querySelector('[data-days-wrap]'); if (!sel || !w) return; const u = () => { w.hidden = sel.value !== 'custom'; }; sel.addEventListener('change', u); u(); }
+async function saveItemForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null, scope = form.dataset.scope, rigId = form.dataset.rig || null, eqId = form.dataset.eq || null;
+  const name = String(fd.get('name') || '').trim(); if (!name) { toast('Say what to check.', 'bad'); return; }
+  const freq = fd.get('freq'), days = freq === 'custom' ? Math.max(1, Number(fd.get('days')) || 7) : (FREQS.find(f => f.k === freq) || FREQS[1]).days;
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    if (id) { const r = await sb.from('checklist_items').update({ name, freq, days }).eq('id', id); if (r.error) throw r.error; }
+    else {
+      const sibs = S.items.filter(i => i.scope_type === scope && (scope === 'base' || (scope === 'rig' ? i.rig_id === rigId : i.equipment_id === eqId)));
+      const mx = Math.max(0, ...sibs.map(i => i.sort || 0));
+      const r = await sb.from('checklist_items').insert({ scope_type: scope, rig_id: scope === 'rig' ? rigId : null, equipment_id: scope === 'equipment' ? eqId : null, name, freq, days, active: true, sort: mx + 10 });
+      if (r.error) throw r.error;
+    }
+    MS.pop(); drawModal(); toast('Check saved', 'ok'); loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+
+/* ---------- check sheet ---------- */
+let CK = null;
+function checkStart(rigId) {
+  const r = rigId === 'station' ? { id: 'station', unit: 'Station', isStation: true } : D.rigById[rigId];
+  if (!r) return;
+  CK = { rigId, date: today(), meter: '', showAll: false, res: {}, saving: false };
+  MS.push(checkSheetHtml); drawModal();
+}
+const marked = x => x && (x.mode === 'ok' || (x.mode === 'prob' && x.s));
+function checkShown() { return rigFlat(CK.rigId).filter(it => { const d = dueInfo(it, CK.rigId); return CK.showAll || d.state === 'due' || d.state === 'never'; }); }
+function ckRowHtml(it) {
+  const x = CK.res[it.id] || {}; const d = dueInfo(it, CK.rigId);
+  const meta = `${esc(freqLabel(it))}${d.last ? `, last ${esc(fmt(d.last))}` : ', not checked yet'}`;
+  let prob = '';
+  if (x.mode === 'prob') prob = `<div class="ci-p"><div class="pills">${STATUS.filter(s => s[0] !== 'ok').map(([k, l]) => `<button class="pill${x.s === k ? ' on' : ''}${!x.s ? ' need' : ''}" data-action="ck-st" data-item="${esc(it.id)}" data-st="${k}">${l}</button>`).join('')}</div><label class="f"><span>Comment</span><textarea data-ck-note="${esc(it.id)}">${esc(x.c || '')}</textarea></label></div>`;
+  return `<div class="ci" data-item="${esc(it.id)}"><div class="ci-top"><div><div class="ci-name">${esc(it.name)}</div><div class="ci-meta">${meta}</div></div>
+    <div class="ci-b"><button class="ck ok${x.mode === 'ok' ? ' on' : ''}" data-action="ck-ok" data-item="${esc(it.id)}">OK</button><button class="ck prob${x.mode === 'prob' ? ' on' : ''}" data-action="ck-prob" data-item="${esc(it.id)}">Problem</button></div></div>${prob}</div>`;
+}
+function checkSheetHtml() {
+  const r = CK.rigId === 'station' ? { unit: 'Station', isStation: true } : D.rigById[CK.rigId];
+  const shown = checkShown();
+  const nMarked = shown.filter(it => marked(CK.res[it.id])).length;
+  const nProb = shown.filter(it => { const x = CK.res[it.id]; return x && x.mode === 'prob'; }).length;
+  const o = rigItems(CK.rigId); const inShown = new Set(shown.map(i => i.id));
+  const groups = []; const g1 = [...o.base, ...o.own].filter(i => inShown.has(i.id)); if (g1.length) groups.push([r.isStation ? 'Checks' : 'Vehicle checks', g1]);
+  const byE = {}; for (const it of o.eq) if (inShown.has(it.id)) (byE[it.equipment_id] = byE[it.equipment_id] || []).push(it);
+  for (const eid in byE) { const e = D.eqById[eid]; groups.push([e ? e.name : 'Equipment', byE[eid]]); }
+  const body = `<div class="stack">
+    <div class="two"><label class="f"><span>Date</span><input type="date" data-ck="date" value="${esc(CK.date)}" max="${today()}"></label>${r.isStation ? '' : `<label class="f"><span>Mileage or hours</span><input data-ck="meter" value="${esc(CK.meter)}" placeholder="e.g. 48,210 mi"></label>`}</div>
+    <label class="chk"><input type="checkbox" data-ck-chk="showAll"${CK.showAll ? ' checked' : ''}>Include checks that are not due yet</label>
+    <div><div class="spread"><b>${nMarked} of ${shown.length} marked</b>${shown.length ? `<button class="btn sm" data-action="ck-allok">Mark all unmarked OK</button>` : ''}</div><div class="prog"><i style="width:${shown.length ? Math.round(nMarked / shown.length * 100) : 0}%"></i></div></div>
+    ${groups.length ? groups.map(([t, its]) => `<div class="card"><div class="grp">${esc(t)}</div>${its.map(ckRowHtml).join('')}</div>`).join('') : '<div class="card empty">Nothing is due right now.</div>'}
+  </div>`;
+  const foot = `<button class="btn" data-action="m-close">Cancel</button><button class="btn primary" data-action="ck-save"${CK.saving ? ' disabled' : ''}>${CK.saving ? 'Saving…' : `Save check${nProb ? ` (${nProb} ${plural(nProb, 'problem')})` : ''}`}</button>`;
+  return sheet(esc(r.unit) + ' check', body, foot, esc(fmt(CK.date)));
+}
+async function saveCheck() {
+  if (!CK || CK.saving) return;
+  const all = rigFlat(CK.rigId);
+  const todo = all.filter(it => marked(CK.res[it.id]));
+  const need = all.filter(it => { const x = CK.res[it.id]; return x && x.mode === 'prob' && !x.s; });
+  if (need.length) { toast('Pick what is wrong for each Problem, or change it to OK.', 'bad'); return; }
+  if (!todo.length) { toast('Mark at least one item first.', 'bad'); return; }
+  if (!CK.date) { toast('Choose a date.', 'bad'); return; }
+  CK.saving = true; drawModal();
+  const rigIdForDb = CK.rigId === 'station' ? null : CK.rigId;
+  try {
+    const sr = await sb.from('check_sessions').insert({ rig_id: rigIdForDb, date: CK.date, meter: CK.meter || '', by_member: S.me.id, by_name: S.me.name }).select('id').single();
+    if (sr.error) throw sr.error;
+    const results = todo.map(it => { const x = CK.res[it.id]; const eq = it.scope_type === 'equipment' ? D.eqById[it.equipment_id] : null; return { session_id: sr.data.id, item_id: it.id, item_name: it.name, equipment_id: eq ? eq.id : null, equipment_name: eq ? eq.name : '', status: x.mode === 'ok' ? 'ok' : x.s, comment: x.mode === 'prob' ? (x.c || '').trim() : '' }; });
+    const rr = await sb.from('check_results').insert(results); if (rr.error) throw rr.error;
+    const probs = results.filter(r => r.status !== 'ok');
+    for (const p of probs) {
+      if (S.defs.some(d => !d.closed && d.item_id === p.item_id && d.rig_id === rigIdForDb)) continue;
+      const dr = await sb.from('deficiencies').insert({ rig_id: rigIdForDb, item_id: p.item_id, item_name: p.item_name, equipment_id: p.equipment_id, equipment_name: p.equipment_name, status: p.status, comment: p.comment, found_date: CK.date, found_by: S.me.name });
+      if (dr.error) throw dr.error;
+    }
+    if (CK.meter && rigIdForDb) { const ur = await sb.from('rigs').update({ meter: CK.meter, meter_date: CK.date }).eq('id', rigIdForDb); if (ur.error) throw ur.error; }
+    MS.pop(); CK = null; drawModal();
+    toast(probs.length ? `Check saved. ${probs.length} ${plural(probs.length, 'deficiency', 'deficiencies')} logged.` : 'Check saved. Everything OK.', probs.length ? '' : 'ok');
+    loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); CK.saving = false; drawModal(); }
+}
+/* ---------- deficiency edit ---------- */
+function defFormHtml(d) {
+  return `<div class="sheet-h"><div><h2>Deficiency</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-def" class="form" data-id="${esc(d.id)}">
+      <div><b>${esc(d.item_name)}</b> <span class="muted">${esc(SL[d.status] || d.status)}</span></div>
+      <label class="f"><span>What is wrong</span><textarea name="comment">${esc(d.comment || '')}</textarea></label>
+      <div class="two"><label class="f"><span>Reported to</span><input name="reported_to" value="${esc(d.reported_to || '')}"></label><label class="f"><span>Date reported</span><input name="date_reported" type="date" value="${esc(d.date_reported || '')}"></label></div>
+      <div class="two"><label class="f"><span>Date back in service</span><input name="back_date" type="date" value="${esc(d.back_date || '')}"></label><label class="chk" style="align-self:end"><input type="checkbox" name="closed"${d.closed ? ' checked' : ''}>Closed</label></div>
+      <label class="f"><span>Resolution notes</span><textarea name="note">${esc(d.note || '')}</textarea></label>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-def')}</div>`;
+}
+async function saveDefForm(form) {
+  const fd = new FormData(form), id = form.dataset.id;
+  const closed = !!fd.get('closed');
+  const data = { comment: (fd.get('comment') || '').trim(), reported_to: (fd.get('reported_to') || '').trim(), date_reported: fd.get('date_reported') || null, back_date: fd.get('back_date') || (closed ? today() : null), closed, note: (fd.get('note') || '').trim() };
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try { const r = await sb.from('deficiencies').update(data).eq('id', id); if (r.error) throw r.error; MS.pop(); drawModal(); toast('Deficiency saved', 'ok'); loadAll(); }
+  catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+async function closeDef(id, closed) { const r = await sb.from('deficiencies').update({ closed, back_date: closed ? today() : null }).eq('id', id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast(closed ? 'Marked back in service' : 'Reopened', 'ok'); loadAll(); }
+async function toggleOOS(id) {
+  const r = D.rigById[id]; if (!r) return;
+  if (r.status === 'out_of_service') { const u = await sb.from('rigs').update({ status: 'in_service', oos_reason: '', oos_since: null }).eq('id', id); if (u.error) { toast('Could not save: ' + u.error.message, 'bad'); return; } toast(r.unit + ' is back in service', 'ok'); loadAll(); return; }
+  MS.push(() => sheet('Mark out of service', `<form id="f-oos" class="form" data-id="${esc(id)}"><label class="f"><span>Reason</span><input name="reason" required placeholder="Pump leak, awaiting repair"></label></form>`, `<button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-oos', 'Mark out of service')}`, esc(r.unit))); drawModal();
+}
+async function saveOOS(form) { const fd = new FormData(form), id = form.dataset.id; const r = await sb.from('rigs').update({ status: 'out_of_service', oos_reason: (fd.get('reason') || '').trim(), oos_since: today() }).eq('id', id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } MS.pop(); drawModal(); toast('Marked out of service', 'ok'); loadAll(); }
+async function archiveRig(id) { if (!window.confirm('Archive this rig? It disappears from the list but every record stays.')) return; const r = await sb.from('rigs').update({ archived: true }).eq('id', id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } S.rigId = null; toast('Rig archived', 'ok'); loadAll(); }
+async function retireEq(id) {
+  const e = D.eqById[id]; if (!e) return;
+  MS.push(() => sheet('Retire equipment', `<form id="f-ret" class="form" data-id="${esc(id)}"><p class="muted">The record and its history stay.</p><label class="f"><span>Date retired</span><input name="date" type="date" value="${today()}" max="${today()}" required></label><label class="f"><span>Why</span><textarea name="note"></textarea></label></form>`, `<button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-ret', 'Retire')}`, esc(e.name))); drawModal();
+}
+async function saveRetire(form) { const fd = new FormData(form), id = form.dataset.id; const r = await sb.from('equipment').update({ status: 'retired', retired_date: fd.get('date'), retire_note: (fd.get('note') || '').trim() }).eq('id', id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } MS.pop(); drawModal(); toast('Equipment retired', 'ok'); loadAll(); }
+async function reactivateEq(id) { const r = await sb.from('equipment').update({ status: 'in_service', retired_date: null, retire_note: '' }).eq('id', id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast('Back in service', 'ok'); loadAll(); }
+async function archiveItem(id, on) { const r = await sb.from('checklist_items').update({ active: on }).eq('id', id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast(on ? 'Restored' : 'Archived. History is kept.', 'ok'); loadAll(); }
+
+/* ---------- apparatus + equipment actions ---------- */
+const RIGACTIONS = {
+  'goto-rigs': el => { S.tab = 'rigs'; S.rigId = el.dataset.rig || null; if (S.rigId) S.rsub = 'checks'; render(); window.scrollTo(0, 0); },
+  'rig-open': el => { S.rigId = el.dataset.id; S.rsub = 'checks'; render(); window.scrollTo(0, 0); },
+  'rig-back': () => { S.rigId = null; render(); window.scrollTo(0, 0); },
+  rsub: el => { S.rsub = el.dataset.sub; render(); },
+  'base-toggle': () => { S.showBase[S.rigId] = !S.showBase[S.rigId]; render(); },
+  'check-start': el => checkStart(el.dataset.id),
+  'ck-save': () => saveCheck(),
+  'ck-ok': el => { const id = el.dataset.item; const x = CK.res[id] || (CK.res[id] = {}); x.mode = x.mode === 'ok' ? null : 'ok'; drawModal(); },
+  'ck-prob': el => { const id = el.dataset.item; const x = CK.res[id] || (CK.res[id] = {}); if (x.mode === 'prob') { x.mode = null; x.s = null; } else x.mode = 'prob'; drawModal(); },
+  'ck-st': el => { const x = CK.res[el.dataset.item]; if (x) { x.s = el.dataset.st; drawModal(); } },
+  'ck-allok': () => { for (const it of checkShown()) { const x = CK.res[it.id] || (CK.res[it.id] = {}); if (!x.mode) x.mode = 'ok'; } drawModal(); },
+  'rig-new': () => { MS.push(() => rigFormHtml(null)); drawModal(); },
+  'rig-edit': el => { if (MS.length) MS.pop(); MS.push(() => rigFormHtml(D.rigById[el.dataset.id])); drawModal(); },
+  'rig-oos': el => toggleOOS(el.dataset.id),
+  'rig-arch': el => archiveRig(el.dataset.id),
+  'eq-new': el => { MS.push(() => eqFormHtml(null, el.dataset.assigned)); drawModal(); eqFormMount($('#modal-root')); },
+  'eq-open': el => { MS.push(() => eqDetailSheet(el.dataset.id)); drawModal(); },
+  'eq-edit': el => { const e = D.eqById[el.dataset.id]; if (MS.length) MS.pop(); MS.push(() => eqFormHtml(e)); drawModal(); eqFormMount($('#modal-root')); },
+  'eq-retire': el => retireEq(el.dataset.id),
+  'eq-react': el => reactivateEq(el.dataset.id),
+  'it-new': el => { MS.push(() => itemFormHtml(el.dataset.scope, el.dataset.rig, el.dataset.eq, null)); drawModal(); itemFormMount($('#modal-root')); },
+  'it-edit': el => { const it = S.items.find(i => i.id === el.dataset.id); if (it) { MS.push(() => itemFormHtml(it.scope_type, it.rig_id, it.equipment_id, it)); drawModal(); itemFormMount($('#modal-root')); } },
+  'it-arch': el => archiveItem(el.dataset.id, false),
+  'it-restore': el => archiveItem(el.dataset.id, true),
+  'it-showarch': el => { S.showArch[el.dataset.key] = !S.showArch[el.dataset.key]; render(); },
+  'def-edit': el => { const d = S.defs.find(x => x.id === el.dataset.id); if (d) { MS.push(() => defFormHtml(d)); drawModal(); } },
+  'def-close': el => closeDef(el.dataset.id, true),
+  'def-reopen': el => closeDef(el.dataset.id, false)
+};
+
 /* ---------- rendering ---------- */
 function renderTabs() {
   const el = $('#tabs'), who = $('#who');
   if (!session || !S.me) { el.innerHTML = ''; who.innerHTML = session ? `<button class="btn sm" data-action="signout">Sign out</button>` : ''; return; }
   const T = (k, l) => `<button data-action="tab" data-tab="${k}"${S.tab === k ? ' aria-current="page"' : ''}>${l}</button>`;
   const showMem = S.perms.view_roster || S.perms.manage_members;
-  el.innerHTML = T('home', 'Home') + (showMem ? T('members', 'Members') : '');
+  const showApp = S.perms.view_apparatus;
+  el.innerHTML = T('home', 'Home') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '');
   who.innerHTML = `<button class="btn sm" data-action="signout">Sign out</button>`;
 }
 function render() {
@@ -590,7 +1068,8 @@ function render() {
   if (S.error) { v.innerHTML = shell(`<div class="banner">Something went wrong loading your data: ${esc(S.error)} <button class="btn sm" data-action="reload">Try again</button></div>`); renderTabs(); return; }
   if (!S.me) { v.innerHTML = unlinkedView(); renderTabs(); return; }
   let tab = S.tab; if (tab === 'members' && !(S.perms.view_roster || S.perms.manage_members)) tab = 'home';
-  v.innerHTML = shell(tab === 'members' ? membersView() : homeView());
+  if ((tab === 'rigs' || tab === 'equipment') && !S.perms.view_apparatus) tab = 'home';
+  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : homeView());
   renderTabs();
   drawModal();
 }
@@ -631,6 +1110,20 @@ async function loadAll() {
       if (rec.error) throw rec.error;
       S.records = rec.data || [];
     }
+    if (S.perms.view_apparatus) {
+      const [rg, it, eq, df, cs] = await Promise.all([
+        sb.from('rigs').select('*').order('sort'),
+        sb.from('checklist_items').select('*').order('sort'),
+        sb.from('equipment').select('*').order('name'),
+        sb.from('deficiencies').select('*').order('found_date', { ascending: false }),
+        sb.from('check_sessions').select('*').order('date', { ascending: false })
+      ]);
+      for (const r of [rg, it, eq, df, cs]) if (r.error) throw r.error;
+      S.rigs = rg.data || []; S.items = it.data || []; S.equipment = eq.data || []; S.defs = df.data || []; S.sessions = cs.data || [];
+      const cr = await sb.from('check_results').select('*');
+      if (cr.error) throw cr.error;
+      S.results = cr.data || [];
+    } else { S.rigs = []; S.equipment = []; S.items = []; S.defs = []; S.sessions = []; S.results = []; }
   } catch (e) { S.error = (e && e.message) || String(e); }
   S.loading = false; derive(); render();
 }
@@ -639,7 +1132,7 @@ async function loadAll() {
 document.addEventListener('click', async e => {
   const el = e.target.closest('[data-action]'); if (!el) return;
   const a = el.dataset.action;
-  if (a === 'tab') { S.tab = el.dataset.tab; render(); window.scrollTo(0, 0); }
+  if (a === 'tab') { S.tab = el.dataset.tab; if (S.tab === 'rigs') S.rigId = null; render(); window.scrollTo(0, 0); }
   else if (a === 'signout') { await sb.auth.signOut(); }
   else if (a === 'reload') { loadAll(); }
   else if (a === 'mem-open') { const id = el.dataset.id; MS.push(() => memSheet(id)); drawModal(); }
@@ -657,6 +1150,7 @@ document.addEventListener('click', async e => {
   else if (a === 'od-copyall') { copyText(odAllText()); }
   else if (a === 'push-on') { enablePush(); }
   else if (a === 'push-off') { disablePush(); }
+  else if (RIGACTIONS[a]) { RIGACTIONS[a](el); }
   else if (a === 'install-app') { if (deferredInstallPrompt) { deferredInstallPrompt.prompt(); deferredInstallPrompt = null; } }
   else if (a === 'copy') { copyText(el.dataset.v || ''); }
   else if (a === 'm-close') { MS.pop(); drawModal(); }
@@ -666,15 +1160,38 @@ document.addEventListener('click', async e => {
     if (r.error) toast('Could not save that: ' + r.error.message, 'bad');
   }
 });
-document.addEventListener('change', e => { if (e.target.dataset && e.target.dataset.od) { S.od[e.target.dataset.od] = e.target.checked; const l = $('#od-list'); if (l) l.innerHTML = odList(); const rr = $('#view'); if (rr) { const chips = rr.querySelector('.rc-chips'); } } });
+document.addEventListener('change', async e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.od) { S.od[t.dataset.od] = t.checked; const l = $('#od-list'); if (l) l.innerHTML = odList(); return; }
+  if (['eq-where', 'eq-cat', 'eq-ret'].includes(t.id)) { S.eq.where = $('#eq-where').value; S.eq.cat = $('#eq-cat').value; S.eq.ret = $('#eq-ret').checked; const l = $('#eq-list'); if (l) l.innerHTML = eqList(); return; }
+  if (t.dataset && t.dataset.unk) return;  // handled by unkMount's own listener
+  if (t.dataset && t.dataset.ckChk && CK) { CK[t.dataset.ckChk] = t.checked; drawModal(); return; }
+  if (t.dataset && t.dataset.change === 'it-excl') {
+    const rig = D.rigById[t.dataset.rig]; if (!rig) return;
+    const ex = new Set(rig.excluded || []); if (t.checked) ex.delete(t.dataset.id); else ex.add(t.dataset.id);
+    const r = await sb.from('rigs').update({ excluded: [...ex] }).eq('id', rig.id);
+    if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+    loadAll();
+  }
+});
 document.addEventListener('input', e => {
-  if (e.target.id === 'mem-q') { S.q = e.target.value; const l = $('#mem-list'); if (l) l.innerHTML = memList(); }
+  const t = e.target;
+  if (t.id === 'mem-q') { S.q = t.value; const l = $('#mem-list'); if (l) l.innerHTML = memList(); return; }
+  if (t.id === 'eq-q') { S.eq.q = t.value; const l = $('#eq-list'); if (l) l.innerHTML = eqList(); return; }
+  if (t.dataset && t.dataset.ck && CK) { CK[t.dataset.ck] = t.value; return; }
+  if (t.dataset && t.dataset.ckNote !== undefined && CK) { const x = CK.res[t.dataset.ckNote]; if (x) x.c = t.value; return; }
 });
 document.addEventListener('submit', async e => {
   if (e.target.id === 'f-mem') { e.preventDefault(); saveMemberForm(e.target); return; }
   if (e.target.id === 'f-req') { e.preventDefault(); saveReqForm(e.target); return; }
   if (e.target.id === 'f-rec') { e.preventDefault(); saveRecordForm(e.target); return; }
   if (e.target.id === 'f-msg') { e.preventDefault(); saveMsgForm(e.target); return; }
+  if (e.target.id === 'f-rig') { e.preventDefault(); saveRigForm(e.target); return; }
+  if (e.target.id === 'f-eq') { e.preventDefault(); saveEqForm(e.target); return; }
+  if (e.target.id === 'f-item') { e.preventDefault(); saveItemForm(e.target); return; }
+  if (e.target.id === 'f-def') { e.preventDefault(); saveDefForm(e.target); return; }
+  if (e.target.id === 'f-oos') { e.preventDefault(); saveOOS(e.target); return; }
+  if (e.target.id === 'f-ret') { e.preventDefault(); saveRetire(e.target); return; }
   if (e.target.id !== 'f-signin') return;
   e.preventDefault();
   const fd = new FormData(e.target), btn = e.target.querySelector('button[type=submit]');
