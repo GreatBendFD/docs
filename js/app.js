@@ -22,21 +22,42 @@ async function refreshPushState() {
   if (!pushSupported()) { S.pushState = 'unsupported'; return; }
   if (Notification.permission === 'denied') { S.pushState = 'denied'; return; }
   const sub = await currentPushSub();
-  S.pushState = sub ? 'on' : 'off';
+  if (!sub) { S.pushState = 'off'; return; }
+  // The browser having a subscription only means your phone talked to Apple or
+  // Google's push service. It says nothing about whether this app's database
+  // knows to use it. Confirm that separately, and re-save it if it's missing.
+  const j = sub.toJSON();
+  try {
+    const r = await sb.from('push_subscriptions').upsert({ member_id: S.me.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: 'endpoint' });
+    S.pushState = r.error ? 'error' : 'on';
+    if (r.error) S.pushError = r.error.message;
+  } catch (e) { S.pushState = 'error'; S.pushError = (e && e.message) || String(e); }
 }
 async function enablePush() {
   if (!S.me) return;
+  await registerSW();
+  let perm;
+  try { perm = await Notification.requestPermission(); } catch (e) { toast('Could not turn on notifications: ' + ((e && e.message) || String(e)), 'bad'); return; }
+  if (perm !== 'granted') { S.pushState = perm === 'denied' ? 'denied' : 'off'; render(); if (perm === 'denied') toast('Notifications are blocked for this site in your browser settings.', 'bad'); return; }
+  let sub;
   try {
-    await registerSW();
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') { S.pushState = perm === 'denied' ? 'denied' : 'off'; render(); if (perm === 'denied') toast('Notifications are blocked for this site in your browser settings.', 'bad'); return; }
     const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
-    const j = sub.toJSON();
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+  } catch (e) { toast('Could not turn on notifications: ' + ((e && e.message) || String(e)), 'bad'); return; }
+  // The phone is now genuinely registered with Apple or Google's push service.
+  // What's left is telling our own database to use it, which is a separate
+  // step that can fail on its own (for example, if 06_push.sql has not been
+  // run yet) without the phone-level part failing at all.
+  const j = sub.toJSON();
+  try {
     const r = await sb.from('push_subscriptions').upsert({ member_id: S.me.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: 'endpoint' });
     if (r.error) throw r.error;
-    S.pushState = 'on'; toast('Notifications are on', 'ok'); render();
-  } catch (e) { toast('Could not turn on notifications: ' + ((e && e.message) || String(e)), 'bad'); }
+    S.pushState = 'on'; S.pushError = ''; toast('Notifications are on', 'ok');
+  } catch (e) {
+    S.pushState = 'error'; S.pushError = (e && e.message) || String(e);
+    toast('Your phone is set up, but saving it to the department\'s records failed: ' + S.pushError, 'bad');
+  }
+  render();
 }
 async function disablePush() {
   try {
@@ -52,6 +73,7 @@ function pushCardHtml() {
   }
   const installBtn = deferredInstallPrompt ? `<button class="btn sm" data-action="install-app">Add to home screen</button>` : '';
   if (S.pushState === 'on') return `<div class="card pad spread" style="margin-bottom:14px"><span>Notifications are on for this device.</span><button class="btn sm" data-action="push-off">Turn off</button></div>`;
+  if (S.pushState === 'error') return `<div class="card pad stack" style="gap:6px;margin-bottom:14px"><span><b>Almost on:</b> this phone is set up with Apple or Google, but saving that to the department's records failed${S.pushError ? ': ' + esc(S.pushError) : '.'}</span><div class="row"><button class="btn sm primary" data-action="push-on">Try again</button><button class="btn sm" data-action="push-off">Turn off</button></div></div>`;
   if (S.pushState === 'denied') return `<div class="card pad" style="margin-bottom:14px"><span class="sm muted">Notifications are blocked for this site. Check your browser's site settings to allow them.</span></div>`;
   return `<div class="card pad spread" style="margin-bottom:14px"><span>Get a notification when there's an urgent message.</span><span class="row">${installBtn}<button class="btn sm primary" data-action="push-on">Turn on notifications</button></span></div>`;
 }
@@ -142,7 +164,7 @@ function tenure(j) {
 let sb = null, session = null;
 const S = {
   loading: true, error: '', fatal: '', me: null, access: null, priv: null, perms: {}, settings: { probation_months: 6 },
-  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true }, pushState: 'unsupported'
+  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true }, pushState: 'unsupported', pushError: ''
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
