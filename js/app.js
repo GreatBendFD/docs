@@ -1143,10 +1143,55 @@ async function loadAudit() {
   } catch (e) { S.auditError = (e && e.message) || String(e); }
   S.auditLoading = false; render();
 }
+async function sendInvites(memberIds) {
+  const body = memberIds ? { member_ids: memberIds } : {};
+  toast('Sending invites…');
+  try {
+    const r = await sb.functions.invoke('invite-members', { body });
+    if (r.error) throw r.error;
+    const d = r.data || {};
+    if (d.note) toast(d.note, 'ok');
+    else toast(`Invited ${d.invited || 0} member(s)${d.failed ? `, ${d.failed} could not be reached -- check the change log or try again` : ''}`, d.failed ? 'bad' : 'ok');
+    if (d.errors && d.errors.length) console.warn('Invite failures:', d.errors);
+    return true;
+  } catch (e) { toast('Could not send invites: ' + ((e && e.message) || String(e)), 'bad'); return false; }
+}
+async function openInvitePicker() {
+  const btn = document.querySelector('[data-action=invite-members]'); if (btn) btn.disabled = true;
+  try {
+    const [members, priv] = await Promise.all([
+      sb.from('members').select('id,name,category').eq('status', 'active').is('user_id', null).order('name'),
+      sb.from('member_private').select('member_id,email')
+    ]);
+    if (members.error) throw members.error; if (priv.error) throw priv.error;
+    const emailByMember = Object.fromEntries((priv.data || []).filter(p => p.email).map(p => [p.member_id, p.email]));
+    const waiting = (members.data || []).filter(m => emailByMember[m.id]);
+    if (!waiting.length) { toast('Nobody without a linked account has an email on file yet.', 'ok'); return; }
+    MS.push(() => invitePickerHtml(waiting, emailByMember));
+    drawModal();
+  } catch (e) { toast('Could not load the list: ' + ((e && e.message) || String(e)), 'bad'); }
+  if (btn) btn.disabled = false;
+}
+function invitePickerHtml(waiting, emailByMember) {
+  return `<div class="sheet-h"><div><h2>Invite members</h2><span class="muted sm">Pick who gets an invite email right now. Anyone left unchecked stays waiting -- come back and invite them later.</span></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><div class="row" style="margin-bottom:10px"><button class="btn sm" data-action="invite-pick-all">Select all</button><button class="btn sm" data-action="invite-pick-none">Select none</button></div>
+      <div class="card list">${waiting.map(m => `<label class="li" style="cursor:pointer"><div class="t"><b>${esc(m.name)}</b><span class="muted sm">${esc(m.category || 'No category')} -- ${esc(emailByMember[m.id])}</span></div><input type="checkbox" class="invite-pick" data-id="${esc(m.id)}" style="width:22px;height:22px;accent-color:var(--navy)"></label>`).join('')}</div></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button><button class="btn primary" data-action="invite-pick-send">Send invites</button></div>`;
+}
+async function sendPickedInvites() {
+  const ids = [...document.querySelectorAll('.invite-pick:checked')].map(el => el.dataset.id);
+  if (!ids.length) { toast('Check at least one person first.', 'bad'); return; }
+  const btn = document.querySelector('[data-action=invite-pick-send]'); if (btn) btn.disabled = true;
+  const ok = await sendInvites(ids);
+  if (ok) { MS.pop(); drawModal(); }
+  if (btn) btn.disabled = false;
+}
 function recordsView() {
   return `<div class="head-row"><h1>Records</h1></div>
     <div class="card pad" style="margin-bottom:14px"><h3>Exports</h3><p class="muted sm" style="margin:4px 0 12px">Spreadsheet files for anyone who asks to see your records, plus a full backup you can keep.</p>
       <div class="row"><button class="btn" data-action="exp-rigs">Rigs</button><button class="btn" data-action="exp-equipment">Equipment</button><button class="btn" data-action="exp-checks">Check history</button><button class="btn" data-action="exp-defs">Deficiencies</button><button class="btn" data-action="exp-members">Members</button><button class="btn primary" data-action="exp-backup">Full backup</button></div></div>
+    <div class="card pad" style="margin-bottom:14px"><h3>Invite members</h3><p class="muted sm" style="margin:4px 0 12px">Choose who gets a sign-in invite. Needs custom SMTP set up first (see the README) -- without it, invites will not reach anyone outside your Supabase organization.</p>
+      <button class="btn primary" data-action="invite-members">Invite members…</button></div>
     <div class="sec"><h3>Change log</h3><span class="muted sm">Who changed what, newest first.</span></div>
     <div class="card list">${S.auditError ? `<div class="empty">Could not load the change log: ${esc(S.auditError)}</div>` : S.audit === null || S.auditLoading ? '<div class="empty">Loading…</div>' : S.audit.length ? S.audit.map(a => `<div class="li"><div class="t"><b>${esc(a.action)}</b><span class="muted sm">${esc(a.what)}</span></div><span class="muted sm" style="text-align:right">${esc(new Date(a.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}${a.actor_name ? '<br>' + esc(a.actor_name) : ''}</span></div>`).join('') : '<div class="empty">No changes logged yet.</div>'}</div>`;
 }
@@ -1242,6 +1287,10 @@ document.addEventListener('click', async e => {
   else if (a === 'mem-new') { openMemberForm(null); }
   else if (a === 'mem-edit') { if (MS.length) MS.pop(); openMemberForm(el.dataset.id); }
   else if (a === 'mem-delete') { deleteMember(el.dataset.id); }
+  else if (a === 'invite-members') { openInvitePicker(); }
+  else if (a === 'invite-pick-all') { document.querySelectorAll('.invite-pick').forEach(el => el.checked = true); }
+  else if (a === 'invite-pick-none') { document.querySelectorAll('.invite-pick').forEach(el => el.checked = false); }
+  else if (a === 'invite-pick-send') { sendPickedInvites(); }
   else if (a === 'mtab') { S.mtab = el.dataset.tab; render(); }
   else if (a === 'req-new') { MS.push(() => reqFormHtml(null)); drawModal(); reqFormMount($('#modal-root')); }
   else if (a === 'req-edit') { const r = S.reqs.find(x => x.id === el.dataset.id); if (r) { if (MS.length) MS.pop(); MS.push(() => reqFormHtml(r)); drawModal(); reqFormMount($('#modal-root')); } }
