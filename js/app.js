@@ -23,13 +23,32 @@ function toast(msg, kind) {
 }
 
 /* ---------- permissions (the database enforces these; this only decides what to show) ---------- */
-const CATS = ['Interior', 'Exterior', 'Fire police', 'Administrative'];
+const CATS = ['Interior Firefighter', 'Exterior Firefighter', 'Fire Police', 'Pump/Apparatus Operator', 'Administrative Member', 'Exempt Member'];
 const PERM_KEYS = ['view_apparatus', 'run_checks', 'edit_equipment', 'log_inspections', 'view_roster', 'manage_training', 'post_messages', 'manage_members', 'manage_events', 'log_incidents', 'admin_setup'];
 const PRESET = {
   admin: PERM_KEYS.slice(),
   officer: ['view_apparatus', 'run_checks', 'edit_equipment', 'log_inspections', 'view_roster', 'manage_training', 'post_messages', 'log_incidents', 'manage_events'],
   member: ['view_apparatus']
 };
+const RANKS = ['Chief', 'Assistant chief', 'Captain', 'Lieutenant', 'Firefighter', 'Probationary', 'Fire police', 'Secretary', 'Treasurer', 'Commissioner'];
+const PERMS = [
+  ['view_apparatus', 'See apparatus, equipment, inspections and deficiencies'],
+  ['run_checks', 'Run checks, log deficiencies, mark a rig out of service'],
+  ['edit_equipment', 'Add and edit equipment, rig details and checklists'],
+  ['log_inspections', 'Log inspections and tests'],
+  ['view_roster', 'See the roster and everyone\u2019s training status'],
+  ['manage_training', 'Record training, fit tests and other requirements for members'],
+  ['post_messages', 'Post messages to the landing page ribbon'],
+  ['manage_members', 'Add members, set roles and permissions, manage requirements'],
+  ['manage_events', 'Create and edit events, and sign other members up'],
+  ['log_incidents', 'Prepare incident reports from CAD emails for NERIS'],
+  ['admin_setup', 'Edit the base checklist, archive rigs, delete records, export data']
+];
+function roleKeyOf(perms) {
+  for (const r in PRESET) { if (PERM_KEYS.every(k => !!perms[k] === PRESET[r].includes(k))) return r; }
+  return 'custom';
+}
+const roleLabelOf = perms => { const k = roleKeyOf(perms); return k === 'admin' ? 'Administrator' : k === 'officer' ? 'Officer' : k === 'custom' ? 'Custom access' : 'Member'; };
 function effPerms(access) {
   const role = (access && access.role) || 'member';
   const base = Object.fromEntries(PERM_KEYS.map(k => [k, (PRESET[role] || PRESET.member).includes(k)]));
@@ -179,7 +198,7 @@ function memList() {
 }
 function membersView() {
   const active = S.members.filter(m => m.status !== 'inactive');
-  return `<div class="head-row"><h1>Members</h1></div>
+  return `<div class="head-row"><h1>Members</h1>${S.perms.manage_members ? '<button class="btn primary" data-action="mem-new">Add member</button>' : ''}</div>
     <div class="rc-chips" style="margin-bottom:12px">${chip(active.length + ' active')}${CATS.map(c => chip(c + ' ' + active.filter(m => m.category === c).length)).join('')}</div>
     <div class="filters" style="grid-template-columns:1fr"><label class="f"><span>Search</span><input id="mem-q" type="search" value="${esc(S.q)}" placeholder="Name or rank"></label></div>
     <div id="mem-list">${memList()}</div>`;
@@ -193,7 +212,91 @@ function memSheet(id) {
       ${m.joined || probInfo(m) ? `<div class="sm muted" style="margin:-4px 0 12px">${m.joined ? 'Joined ' + esc(fmt(m.joined)) + (tenure(m.joined) ? ' (' + esc(tenure(m.joined)) + '). ' : '. ') : ''}${esc(probLine(m))}</div>` : ''}
       <div class="sec" style="margin-top:0"><h3>Requirements</h3></div>
       <div class="card list">${rows.length ? rows.map(reqLine).join('') : `<div class="empty">${canSee ? 'Nothing is required yet.' : 'You can see the directory but not training records.'}</div>`}</div></div>
-    <div class="sheet-f"><button class="btn" data-action="m-close">Close</button></div>`;
+    <div class="sheet-f"><button class="btn" data-action="m-close">Close</button>${S.perms.manage_members ? `<button class="btn primary" data-action="mem-edit" data-id="${esc(id)}">Edit</button>` : ''}</div>`;
+}
+
+
+/* ---------- add / edit member ---------- */
+function memberFormHtml(m, priv, access) {
+  const x = m || { status: 'active' };
+  const perms = access ? effPerms(access) : Object.fromEntries(PERM_KEYS.map(k => [k, PRESET.member.includes(k)]));
+  const roleSel = access ? roleKeyOf(perms) : 'member';
+  return `<div class="sheet-h"><div><h2>${m ? 'Edit member' : 'Add member'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-mem" class="form" data-id="${esc(x.id || '')}">
+      <label class="f"><span>Name</span><input name="name" value="${esc(x.name || '')}" required></label>
+      <label class="f"><span>Email</span><input name="email" type="email" value="${esc((priv && priv.email) || '')}" placeholder="Used to link their sign-in"></label>
+      <div class="two">
+        <label class="f"><span>Title or rank</span><input name="title" list="dl-rank" value="${esc(x.title || '')}"></label>
+        <label class="f"><span>Category</span><select name="category"><option value="">None</option>${CATS.map(c => `<option value="${esc(c)}"${x.category === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+      </div>
+      <div class="two">
+        <label class="f"><span>Date joined</span><input name="joined" type="date" max="${today()}" value="${esc(x.joined || (m ? '' : today()))}"></label>
+        <label class="f" data-prob-wrap hidden><span>Probation ends (optional)</span><input name="probation_end" type="date" value="${esc(x.probation_end || '')}"></label>
+      </div>
+      <div class="muted sm" style="margin-top:-6px">Titled Probationary? They become Firefighters automatically ${probMonths()} months after the date joined. Use "Probation ends" only to extend or shorten one person.</div>
+      ${m ? `<label class="f"><span>Status</span><select name="status"><option value="active"${x.status !== 'inactive' ? ' selected' : ''}>Active</option><option value="inactive"${x.status === 'inactive' ? ' selected' : ''}>Inactive</option></select></label>` : ''}
+      <label class="f"><span>NYS training ID</span><input name="nys_id" value="${esc((priv && priv.nys_id) || '')}" placeholder="Used on state training records"></label>
+      <label class="f"><span>Role</span><select name="role">${[['admin', 'Administrator'], ['officer', 'Officer'], ['member', 'Member'], ['custom', 'Custom']].map(([k, l]) => `<option value="${k}"${roleSel === k ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <div class="f"><span>What this person can do</span><div class="permlist">${PERMS.map(([k, l]) => `<label class="chk perm"><input type="checkbox" name="perm_${k}" data-perm="${k}"${perms[k] ? ' checked' : ''}><span>${esc(l)}</span></label>`).join('')}</div></div>
+      <datalist id="dl-rank">${RANKS.map(r => `<option value="${esc(r)}">`).join('')}</datalist>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button><button class="btn primary" type="submit" form="f-mem">Save</button></div>`;
+}
+function memFormMount(root) {
+  const sel = root.querySelector('[name=role]'), boxes = [...root.querySelectorAll('input[data-perm]')];
+  const ti = root.querySelector('[name=title]'), pw = root.querySelector('[data-prob-wrap]');
+  if (ti && pw) { const u = () => { pw.hidden = ti.value.trim().toLowerCase() !== PROB.toLowerCase(); }; ti.addEventListener('input', u); u(); }
+  if (!sel) return;
+  const detect = () => { const on = new Set(boxes.filter(b => b.checked).map(b => b.dataset.perm)); for (const r in PRESET) { if (PERM_KEYS.every(k => on.has(k) === PRESET[r].includes(k))) { sel.value = r; return; } } sel.value = 'custom'; };
+  sel.addEventListener('change', () => { if (PRESET[sel.value]) { const set = new Set(PRESET[sel.value]); boxes.forEach(b => { b.checked = set.has(b.dataset.perm); }); } });
+  boxes.forEach(b => b.addEventListener('change', detect));
+}
+async function openMemberForm(id) {
+  let m = null, priv = null, access = null;
+  if (id) {
+    m = D.memById[id];
+    const [p, a] = await Promise.all([sb.from('member_private').select('*').eq('member_id', id).maybeSingle(), sb.from('member_access').select('*').eq('member_id', id).maybeSingle()]);
+    if (p.error || a.error) { toast('Could not load that member: ' + ((p.error || a.error).message), 'bad'); return; }
+    priv = p.data; access = a.data;
+  }
+  MS.push(() => memberFormHtml(m, priv, access));
+  drawModal(); memFormMount(document.querySelector('#modal-root'));
+}
+async function saveMemberForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null;
+  const name = String(fd.get('name') || '').trim();
+  if (!name) { toast('Enter a name.', 'bad'); return; }
+  const email = String(fd.get('email') || '').trim();
+  const title = String(fd.get('title') || '').trim();
+  const category = fd.get('category') || '';
+  const joined = fd.get('joined') || null;
+  const probEndVal = title.toLowerCase() === PROB.toLowerCase() ? (fd.get('probation_end') || null) : null;
+  const status = id ? (fd.get('status') || 'active') : 'active';
+  const nysId = String(fd.get('nys_id') || '').trim();
+  const role = fd.get('role');
+  const perms = Object.fromEntries(PERM_KEYS.map(k => [k, !!fd.get('perm_' + k)]));
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    let mid = id;
+    if (id) {
+      const r = await sb.from('members').update({ name, title, category, joined, probation_end: probEndVal, status }).eq('id', id);
+      if (r.error) throw r.error;
+    } else {
+      const r = await sb.from('members').insert({ name, title, category, joined, probation_end: probEndVal, status: 'active' }).select('id').single();
+      if (r.error) throw r.error;
+      mid = r.data.id;
+    }
+    if (email || nysId || id) {
+      const r = await sb.from('member_private').upsert({ member_id: mid, email: email || null, nys_id: nysId }, { onConflict: 'member_id' });
+      if (r.error) { if (/duplicate|unique/i.test(r.error.message)) throw new Error('That email is already used by another member.'); throw r.error; }
+    }
+    const r = await sb.from('member_access').upsert({ member_id: mid, role, perms }, { onConflict: 'member_id' });
+    if (r.error) throw r.error;
+    MS.pop(); drawModal(); toast('Member saved', 'ok'); loadAll();
+  } catch (e) {
+    toast('Could not save: ' + ((e && e.message) || String(e)), 'bad');
+    if (btn) btn.disabled = false;
+  }
 }
 
 /* ---------- rendering ---------- */
@@ -267,6 +370,8 @@ document.addEventListener('click', async e => {
   else if (a === 'signout') { await sb.auth.signOut(); }
   else if (a === 'reload') { loadAll(); }
   else if (a === 'mem-open') { const id = el.dataset.id; MS.push(() => memSheet(id)); drawModal(); }
+  else if (a === 'mem-new') { openMemberForm(null); }
+  else if (a === 'mem-edit') { if (MS.length) MS.pop(); openMemberForm(el.dataset.id); }
   else if (a === 'm-close') { MS.pop(); drawModal(); }
   else if (a === 'dismiss') {
     const id = el.dataset.id; S.dismissed.add(id); render();
@@ -278,6 +383,7 @@ document.addEventListener('input', e => {
   if (e.target.id === 'mem-q') { S.q = e.target.value; const l = $('#mem-list'); if (l) l.innerHTML = memList(); }
 });
 document.addEventListener('submit', async e => {
+  if (e.target.id === 'f-mem') { e.preventDefault(); saveMemberForm(e.target); return; }
   if (e.target.id !== 'f-signin') return;
   e.preventDefault();
   const fd = new FormData(e.target), btn = e.target.querySelector('button[type=submit]');
