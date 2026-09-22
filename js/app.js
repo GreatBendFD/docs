@@ -16,6 +16,11 @@ const plural = (n, a, b) => n === 1 ? a : (b || a + 's');
 const first = n => String(n || '').trim().split(/\s+/)[0] || '';
 const chip = (t, tone) => `<span class="chip${tone ? ' ' + tone : ''}">${esc(t)}</span>`;
 
+async function copyText(v) {
+  try { await navigator.clipboard.writeText(v); toast('Copied', 'ok'); return; } catch (e) {}
+  try { const ta = document.createElement('textarea'); ta.value = v; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); toast(ok ? 'Copied' : 'Could not copy. Press and hold the text instead.', ok ? 'ok' : 'bad'); }
+  catch (e2) { toast('Could not copy. Press and hold the text instead.', 'bad'); }
+}
 function toast(msg, kind) {
   const t = $('#toast'), d = document.createElement('div');
   d.textContent = msg; if (kind) d.className = kind; t.appendChild(d);
@@ -82,13 +87,13 @@ function tenure(j) {
 let sb = null, session = null;
 const S = {
   loading: true, error: '', fatal: '', me: null, access: null, priv: null, perms: {}, settings: { probation_months: 6 },
-  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: ''
+  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true }
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
 
 function resetState() {
-  S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.mtab = 'roster'; S.q = ''; S.error = ''; S.loading = false;
+  S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.mtab = 'roster'; S.q = ''; S.od = { none: true, soon: true }; S.error = ''; S.loading = false;
   D = { latest: {}, memById: {} }; MS.length = 0;
 }
 
@@ -187,6 +192,7 @@ function homeView() {
     <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${m.category ? 'Nothing is required for ' + esc(m.category) + ' members yet.' : 'No category is set on your record yet.'}</div>`}</div>
     <p class="muted sm" style="margin-top:18px">Signed in as ${esc(session.user.email)}. Role: ${esc(roleLabel())}.</p>`;
 }
+const saveBtn = (formId, label) => `<button class="btn primary" type="submit" form="${formId}">${label || 'Save'}</button>`;
 const roleLabel = () => { const r = S.access && S.access.role; return r === 'admin' ? 'Administrator' : r === 'officer' ? 'Officer' : r === 'custom' ? 'Custom access' : 'Member'; };
 
 function memberCard(m) {
@@ -212,11 +218,15 @@ function reqsView() {
     <div class="card list">${list.length ? list.map(r => `<div class="li${r.active === false ? ' off' : ''}"><div class="t"><b>${esc(r.name)}</b><span class="muted sm">${esc(reqFreqLabel(r))}. Applies to ${esc((r.categories || []).join(', ') || 'no one yet')}.</span></div><div class="acts"><button class="btn sm" data-action="req-edit" data-id="${esc(r.id)}">Edit</button><button class="btn sm" data-action="req-archive" data-id="${esc(r.id)}" data-on="${r.active === false ? '1' : '0'}">${r.active === false ? 'Restore' : 'Archive'}</button></div></div>`).join('') : '<div class="empty">No requirements yet.</div>'}</div>`;
 }
 function membersView() {
-  const tabs = [['roster', 'Roster']]; if (S.perms.manage_members) tabs.push(['reqs', 'Requirements']);
+  const tabs = [['roster', 'Roster']];
+  if (S.perms.view_roster) tabs.push(['overdue', 'Overdue']);
+  if (S.perms.manage_members) tabs.push(['reqs', 'Requirements']);
+  if (S.perms.post_messages) tabs.push(['msgs', 'Messages']);
   if (!tabs.some(t => t[0] === S.mtab)) S.mtab = 'roster';
-  return `<div class="head-row"><h1>Members</h1>${S.mtab === 'roster' && S.perms.manage_members ? '<button class="btn primary" data-action="mem-new">Add member</button>' : ''}</div>
+  const body = S.mtab === 'reqs' ? reqsView() : S.mtab === 'overdue' ? overdueView() : S.mtab === 'msgs' ? msgsView() : rosterView();
+  return `<div class="head-row"><h1>Members</h1>${S.mtab === 'roster' && S.perms.manage_members ? '<button class="btn primary" data-action="mem-new">Add member</button>' : S.mtab === 'msgs' && S.perms.post_messages ? '<button class="btn primary" data-action="msg-new">Post a message</button>' : ''}</div>
     ${tabs.length > 1 ? `<div class="subtabs">${tabs.map(([k, l]) => `<button data-action="mtab" data-tab="${k}"${S.mtab === k ? ' aria-current="page"' : ''}>${l}</button>`).join('')}</div>` : ''}
-    ${S.mtab === 'reqs' ? reqsView() : rosterView()}`;
+    ${body}`;
 }
 function memSheet(id) {
   const m = D.memById[id]; if (!m) return '';
@@ -380,6 +390,100 @@ async function saveRecordForm(form) {
   MS.pop(); drawModal(); toast('Record saved', 'ok'); loadAll();
 }
 
+
+/* ---------- overdue report ---------- */
+const needRank = x => x.state === 'failed' ? 0 : x.state === 'overdue' ? 1 : x.state === 'none' ? 2 : 3;
+function needRows(m, inc) {
+  return reqRows(m).filter(x => x.state === 'overdue' || x.state === 'failed' || (inc.none && x.state === 'none') || (inc.soon && x.state === 'soon'))
+    .sort((a, b) => needRank(a) - needRank(b) || (a.diff || 0) - (b.diff || 0) || a.req.name.localeCompare(b.req.name));
+}
+function needText(x) {
+  switch (x.state) {
+    case 'failed': return `${x.req.name}: not current${x.rec && x.rec.result ? ' (last result: ' + x.rec.result + ')' : ''}`;
+    case 'overdue': return `${x.req.name}: overdue by ${-x.diff} ${plural(-x.diff, 'day')}${x.rec && x.rec.due_on ? ' (was due ' + fmt(x.rec.due_on) + ')' : ''}`;
+    case 'none': return `${x.req.name}: no record on file`;
+    default: return `${x.req.name}: due in ${x.diff} ${plural(x.diff, 'day')}${x.rec && x.rec.due_on ? ' (' + fmt(x.rec.due_on) + ')' : ''}`;
+  }
+}
+function odGroups() {
+  const inc = S.od;
+  return S.members.filter(m => m.status !== 'inactive').map(m => ({ m, rows: needRows(m, inc) })).filter(g => g.rows.length)
+    .sort((a, b) => needRank(a.rows[0]) - needRank(b.rows[0]) || (a.rows[0].diff || 0) - (b.rows[0].diff || 0) || a.m.name.localeCompare(b.m.name));
+}
+const odReminder = g => `Hi ${first(g.m.name)}, this is a reminder from Great Bend Fire Department. Our records show:\n${g.rows.map(x => '- ' + needText(x)).join('\n')}\nPlease let an officer know once these are taken care of.`;
+const odAllText = () => { const gs = odGroups(); if (!gs.length) return 'Nobody needs attention.'; return 'Great Bend Fire Department, requirements needing attention (' + fmt(today()) + ')\n\n' + gs.map(g => g.m.name + (g.m.category ? ' (' + g.m.category + ')' : '') + '\n' + g.rows.map(x => '- ' + needText(x)).join('\n')).join('\n\n'); };
+function odList() {
+  const gs = odGroups();
+  if (!gs.length) return '<div class="card empty">Nobody needs attention. Everyone is current.</div>';
+  return `<div class="stack">${gs.map(g => `<div class="card"><div class="grp spread"><span>${esc(g.m.name)} <span class="muted sm">${esc(g.m.category || 'No category')}</span></span><button class="btn sm" data-action="copy" data-v="${esc(odReminder(g))}">Copy reminder</button></div><div class="list">${g.rows.map(x => `<div class="li"><div class="t"><b>${esc(x.req.name)}</b><span class="muted sm">${x.rec ? (x.rec.done_on ? (x.rec.approx ? 'Done in ' + esc(x.rec.done_on.slice(0, 4)) : 'Last done ' + esc(fmt(x.rec.done_on))) : 'On record, no date') : 'Nothing recorded'}</span></div><div class="acts">${reqChip(x)}</div></div>`).join('')}</div></div>`).join('')}</div>`;
+}
+function overdueView() {
+  const gs = odGroups();
+  const nOver = S.members.filter(m => m.status !== 'inactive' && reqRows(m).some(x => x.state === 'overdue' || x.state === 'failed')).length;
+  return `<div class="head-row"><div><h3>Needs attention</h3><span class="muted sm">Overdue and failed items, plus the options below. Copy a reminder to paste into IamResponding or an email.</span></div><button class="btn" data-action="od-copyall">Copy the whole list</button></div>
+    <div class="rc-chips" style="margin-bottom:8px">${chip(gs.length + ' ' + plural(gs.length, 'member') + ' listed', gs.length ? 'warn' : 'ok')}${nOver ? chip(nOver + ' overdue', 'bad') : chip('None overdue', 'ok')}</div>
+    <div class="row" style="margin-bottom:10px"><label class="chk"><input type="checkbox" data-od="none"${S.od.none ? ' checked' : ''}>Include missing records</label><label class="chk"><input type="checkbox" data-od="soon"${S.od.soon ? ' checked' : ''}>Include due within 30 days</label></div>
+    <div id="od-list">${odList()}</div>`;
+}
+/* ---------- messages (the ribbon) management ---------- */
+const TONES = [['info', 'Information'], ['notice', 'Important'], ['urgent', 'Urgent']];
+const msgAud = m => (m.aud_all || !(m.aud_cats && m.aud_cats.length)) ? 'Everyone' : m.aud_cats.join(', ');
+function msgFormHtml(m) {
+  const x = m || { tone: 'info', aud_all: true, aud_cats: [], starts_on: today(), ends_on: '' };
+  const all = x.aud_all !== false && !(x.aud_cats && x.aud_cats.length) || !!x.aud_all;
+  return `<div class="sheet-h"><div><h2>${m ? 'Edit message' : 'Post a message'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-msg" class="form" data-id="${esc(x.id || '')}">
+      <label class="f"><span>Message</span><textarea name="body" maxlength="300" required placeholder="Hose testing Saturday at 8 a.m. at the station.">${esc(x.body || '')}</textarea></label>
+      <label class="f"><span>Type</span><select name="tone">${TONES.map(([k, l]) => `<option value="${k}"${(x.tone || 'info') === k ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <div class="f"><span>Who sees it</span><div class="aud"><label class="chk"><input type="checkbox" name="aud_all" data-aud="all"${all ? ' checked' : ''}><span>Everyone</span></label>${CATS.map(c => `<label class="chk"><input type="checkbox" name="cat" value="${esc(c)}" data-aud="cat"${!all && (x.aud_cats || []).includes(c) ? ' checked' : ''}${all ? ' disabled' : ''}><span>${esc(c)}</span></label>`).join('')}</div></div>
+      <div class="two"><label class="f"><span>Show from</span><input name="starts_on" type="date" value="${esc(x.starts_on || today())}"></label><label class="f"><span>Show until</span><input name="ends_on" type="date" value="${esc(x.ends_on || '')}"></label></div>
+      <div class="muted sm" style="margin-top:-6px">Leave "until" empty to keep it up until you end it. Urgent messages can't be dismissed by members.</div>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-msg', m ? 'Save' : 'Post message')}</div>`;
+}
+function msgFormMount(root) {
+  const all = root.querySelector('[data-aud=all]'); if (!all) return;
+  const cats = [...root.querySelectorAll('[data-aud=cat]')];
+  all.addEventListener('change', () => { cats.forEach(c => { c.disabled = all.checked; if (all.checked) c.checked = false; }); });
+}
+async function saveMsgForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null;
+  const body = String(fd.get('body') || '').trim(); if (!body) { toast('Write a message first.', 'bad'); return; }
+  const audAll = !!fd.get('aud_all'), cats = fd.getAll('cat');
+  if (!audAll && !cats.length) { toast('Choose who should see this message.', 'bad'); return; }
+  const starts_on = fd.get('starts_on') || today(), ends_on = fd.get('ends_on') || null;
+  if (ends_on && ends_on < starts_on) { toast('The end date is before the start date.', 'bad'); return; }
+  const payload = { body, tone: fd.get('tone'), aud_all: audAll, aud_cats: audAll ? [] : cats, starts_on, ends_on };
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    if (id) { const r = await sb.from('messages').update(payload).eq('id', id); if (r.error) throw r.error; }
+    else { const r = await sb.from('messages').insert({ ...payload, by_member: S.me.id, removed: false }); if (r.error) throw r.error; }
+    MS.pop(); drawModal(); toast(id ? 'Message saved' : 'Message posted', 'ok'); loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+async function endMsgNow(id) {
+  const r = await sb.from('messages').update({ ends_on: addDays(today(), -1) }).eq('id', id);
+  if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+  toast('Message ended', 'ok'); loadAll();
+}
+async function removeMsg(id) {
+  if (!window.confirm('Remove this message? It disappears for everyone.')) return;
+  const r = await sb.from('messages').update({ removed: true }).eq('id', id);
+  if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+  toast('Message removed', 'ok'); loadAll();
+}
+function msgsView() {
+  const list = S.messages.filter(m => !m.removed).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')), t = today();
+  return `<div class="head-row"><div><h3>Messages</h3><span class="muted sm">Shown as a ribbon at the top of the home page.</span></div></div>
+    <div class="stack">${list.length ? list.map(m => {
+      const st = m.starts_on && m.starts_on > t ? 'Scheduled' : (m.ends_on && m.ends_on < t) ? 'Ended' : 'Showing';
+      return `<div class="card pad stack" style="gap:8px"><div style="white-space:pre-wrap;overflow-wrap:anywhere;font-weight:600">${esc(m.body)}</div>
+        <div class="rc-chips">${chip(st, st === 'Showing' ? 'ok' : '')}${chip((TONES.find(x => x[0] === m.tone) || TONES[0])[1])}${chip(msgAud(m))}</div>
+        <div class="muted sm">Shows ${esc(fmt(m.starts_on))}${m.ends_on ? ' until ' + esc(fmt(m.ends_on)) : ', until you end it'}.</div>
+        <div class="row"><button class="btn sm" data-action="msg-edit" data-id="${esc(m.id)}">Edit</button>${st !== 'Ended' ? `<button class="btn sm" data-action="msg-end" data-id="${esc(m.id)}">End now</button>` : ''}<button class="btn sm danger" data-action="msg-remove" data-id="${esc(m.id)}">Remove</button></div></div>`;
+    }).join('') : '<div class="card empty">No messages yet. Post one and it appears at the top of everyone\u2019s home page.</div>'}</div>`;
+}
+
 /* ---------- rendering ---------- */
 function renderTabs() {
   const el = $('#tabs'), who = $('#who');
@@ -420,7 +524,7 @@ async function loadAll() {
       sb.from('members').select('*').order('name'),
       sb.from('requirements').select('*').order('sort'),  // all rows, including archived; reqRows() filters active ones
       sb.from('settings').select('*').eq('id', 1).maybeSingle(),
-      sb.from('messages').select('*').eq('removed', false).order('created_at', { ascending: false }),
+      sb.from('messages').select('*').order('created_at', { ascending: false }),  // posters get every message via RLS; others only get what's meant for them
       sb.from('message_dismissals').select('message_id')
     ]);
     for (const r of [m, rq, st, ms, ds]) if (r.error) throw r.error;
@@ -458,6 +562,12 @@ document.addEventListener('click', async e => {
   else if (a === 'req-edit') { const r = S.reqs.find(x => x.id === el.dataset.id); if (r) { if (MS.length) MS.pop(); MS.push(() => reqFormHtml(r)); drawModal(); reqFormMount($('#modal-root')); } }
   else if (a === 'req-archive') { toggleReqArchive(el.dataset.id, el.dataset.on === '1'); }
   else if (a === 'rec-new') { const req = S.reqs.find(x => x.id === el.dataset.req); if (req) { MS.push(() => recordFormHtml(el.dataset.member, req)); drawModal(); recordFormMount($('#modal-root'), req); } }
+  else if (a === 'msg-new') { MS.push(() => msgFormHtml(null)); drawModal(); msgFormMount($('#modal-root')); }
+  else if (a === 'msg-edit') { const m = S.messages.find(x => x.id === el.dataset.id); if (m) { MS.push(() => msgFormHtml(m)); drawModal(); msgFormMount($('#modal-root')); } }
+  else if (a === 'msg-end') { endMsgNow(el.dataset.id); }
+  else if (a === 'msg-remove') { removeMsg(el.dataset.id); }
+  else if (a === 'od-copyall') { copyText(odAllText()); }
+  else if (a === 'copy') { copyText(el.dataset.v || ''); }
   else if (a === 'm-close') { MS.pop(); drawModal(); }
   else if (a === 'dismiss') {
     const id = el.dataset.id; S.dismissed.add(id); render();
@@ -465,6 +575,7 @@ document.addEventListener('click', async e => {
     if (r.error) toast('Could not save that: ' + r.error.message, 'bad');
   }
 });
+document.addEventListener('change', e => { if (e.target.dataset && e.target.dataset.od) { S.od[e.target.dataset.od] = e.target.checked; const l = $('#od-list'); if (l) l.innerHTML = odList(); const rr = $('#view'); if (rr) { const chips = rr.querySelector('.rc-chips'); } } });
 document.addEventListener('input', e => {
   if (e.target.id === 'mem-q') { S.q = e.target.value; const l = $('#mem-list'); if (l) l.innerHTML = memList(); }
 });
@@ -472,6 +583,7 @@ document.addEventListener('submit', async e => {
   if (e.target.id === 'f-mem') { e.preventDefault(); saveMemberForm(e.target); return; }
   if (e.target.id === 'f-req') { e.preventDefault(); saveReqForm(e.target); return; }
   if (e.target.id === 'f-rec') { e.preventDefault(); saveRecordForm(e.target); return; }
+  if (e.target.id === 'f-msg') { e.preventDefault(); saveMsgForm(e.target); return; }
   if (e.target.id !== 'f-signin') return;
   e.preventDefault();
   const fd = new FormData(e.target), btn = e.target.querySelector('button[type=submit]');
