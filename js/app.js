@@ -30,7 +30,7 @@ const PRESET = {
   officer: ['view_apparatus', 'run_checks', 'edit_equipment', 'log_inspections', 'view_roster', 'manage_training', 'post_messages', 'log_incidents', 'manage_events'],
   member: ['view_apparatus']
 };
-const RANKS = ['Chief', 'Assistant chief', 'Captain', 'Lieutenant', 'Firefighter', 'Probationary', 'Fire police', 'Secretary', 'Treasurer', 'Commissioner'];
+const RANKS = ['Chief', '1st Assistant Chief', '2nd Assistant Chief', '3rd Assistant Chief', 'Captain', 'Lieutenant', 'Firefighter', 'Probationary', 'Fire police', 'President', 'Vice President', 'Secretary', 'Treasurer', 'Commissioner'];
 const PERMS = [
   ['view_apparatus', 'See apparatus, equipment, inspections and deficiencies'],
   ['run_checks', 'Run checks, log deficiencies, mark a rig out of service'],
@@ -57,6 +57,9 @@ function effPerms(access) {
 
 /* ---------- requirements and probation (same rules as the prototype) ---------- */
 const REQ_FREQS = { annual: 'Every year', semiannual: 'Every 6 months', quarterly: 'Every 3 months', '2y': 'Every 2 years', '3y': 'Every 3 years', '5y': 'Every 5 years', once: 'One time only' };
+const REQ_FREQ_OPTS = [['annual', 'Every year'], ['semiannual', 'Every 6 months'], ['quarterly', 'Every 3 months'], ['2y', 'Every 2 years'], ['3y', 'Every 3 years'], ['5y', 'Every 5 years'], ['once', 'One time only'], ['custom', 'Custom (days)']];
+const REQ_FREQ_DAYS = { annual: 365, semiannual: 182, quarterly: 91, '2y': 730, '3y': 1095, '5y': 1826, once: 0 };
+const freqDaysOf = (freq, days) => freq === 'custom' ? Math.max(1, Number(days) || 365) : (REQ_FREQ_DAYS[freq] ?? 365);
 const reqFreqLabel = r => r.freq === 'custom' ? 'Every ' + (Number(r.days) || 365) + ' days' : (REQ_FREQS[r.freq] || REQ_FREQS.annual);
 const FAILRES = ['Fail', 'Not cleared'];
 const PROB = 'Probationary';
@@ -79,13 +82,13 @@ function tenure(j) {
 let sb = null, session = null;
 const S = {
   loading: true, error: '', fatal: '', me: null, access: null, priv: null, perms: {}, settings: { probation_months: 6 },
-  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', q: ''
+  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: ''
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
 
 function resetState() {
-  S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.q = ''; S.error = ''; S.loading = false;
+  S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.mtab = 'roster'; S.q = ''; S.error = ''; S.loading = false;
   D = { latest: {}, memById: {} }; MS.length = 0;
 }
 
@@ -100,7 +103,7 @@ function derive() {
 
 function reqRows(m) {
   const lat = D.latest[m.id] || {};
-  const reqs = S.reqs.filter(r => (m.category && (r.categories || []).includes(m.category)) || lat[r.id]).sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name));
+  const reqs = S.reqs.filter(r => r.active !== false && ((m.category && (r.categories || []).includes(m.category)) || lat[r.id])).sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name));
   return reqs.map(r => {
     const rec = lat[r.id] || null; let state = 'none', diff = null;
     if (rec) { if (FAILRES.includes(rec.result)) state = 'failed'; else if (rec.due_on) { diff = diffDays(today(), rec.due_on); state = diff < 0 ? 'overdue' : diff <= 30 ? 'soon' : 'ok'; } else state = 'ok'; }
@@ -117,10 +120,11 @@ function reqChip(x) {
     default: return chip(x.rec && x.rec.approx ? 'Done in ' + (x.rec.done_on || '').slice(0, 4) : x.rec && x.rec.due_on ? 'Current until ' + fmt(x.rec.due_on) : 'Completed', 'ok');
   }
 }
-function reqLine(x) {
+function reqLine(x, memberId) {
   const r = x.rec;
   const when = !r ? 'Nothing recorded yet.' : !r.done_on ? 'On record, date not recorded.' : r.approx ? `Done in ${esc(r.done_on.slice(0, 4))}, exact date not recorded.` : `Last done ${esc(fmt(r.done_on))}${r.result ? ', ' + esc(r.result) : ''}.`;
-  return `<div class="li"><div class="t"><b>${esc(x.req.name)}</b><span class="muted sm">${when}${r && r.notes && r.notes.length <= 40 && !r.approx ? ' ' + esc(r.notes) + '.' : ''} ${esc(reqFreqLabel(x.req))}.</span></div><div class="acts">${reqChip(x)}</div></div>`;
+  const canRecord = memberId && S.perms.manage_training;
+  return `<div class="li"><div class="t"><b>${esc(x.req.name)}</b><span class="muted sm">${when}${r && r.notes && r.notes.length <= 40 && !r.approx ? ' ' + esc(r.notes) + '.' : ''} ${esc(reqFreqLabel(x.req))}.</span></div><div class="acts">${reqChip(x)}${canRecord ? `<button class="btn sm" data-action="rec-new" data-member="${esc(memberId)}" data-req="${esc(x.req.id)}">Record</button>` : ''}</div></div>`;
 }
 function myAlertHtml(m) {
   const rows = reqRows(m);
@@ -180,7 +184,7 @@ function homeView() {
       <div class="rc-chips" style="margin-top:6px">${chip(m.category || 'No category set')}${rankOf(m) ? chip(rankOf(m)) : ''}${probChip(m)}${S.access ? chip(roleLabel()) : ''}</div>${dep}
       ${p.nys_id ? `<div class="sm muted" style="margin-top:6px">NYS training ID: <b style="color:var(--ink)">${esc(p.nys_id)}</b></div>` : ''}</div></div>
     <div class="sec" style="margin-top:0"><h3>My requirements</h3></div>
-    <div class="card list">${rows.length ? rows.map(reqLine).join('') : `<div class="empty">${m.category ? 'Nothing is required for ' + esc(m.category) + ' members yet.' : 'No category is set on your record yet.'}</div>`}</div>
+    <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${m.category ? 'Nothing is required for ' + esc(m.category) + ' members yet.' : 'No category is set on your record yet.'}</div>`}</div>
     <p class="muted sm" style="margin-top:18px">Signed in as ${esc(session.user.email)}. Role: ${esc(roleLabel())}.</p>`;
 }
 const roleLabel = () => { const r = S.access && S.access.role; return r === 'admin' ? 'Administrator' : r === 'officer' ? 'Officer' : r === 'custom' ? 'Custom access' : 'Member'; };
@@ -196,12 +200,23 @@ function memList() {
   const list = S.members.filter(m => m.status !== 'inactive' && (!q || (m.name + ' ' + rankOf(m) + ' ' + (m.title || '')).toLowerCase().includes(q))).sort((a, b) => a.name.localeCompare(b.name));
   return list.length ? `<div class="eqlist">${list.map(memberCard).join('')}</div>` : '<div class="card empty">Nobody matches.</div>';
 }
-function membersView() {
+function rosterView() {
   const active = S.members.filter(m => m.status !== 'inactive');
-  return `<div class="head-row"><h1>Members</h1>${S.perms.manage_members ? '<button class="btn primary" data-action="mem-new">Add member</button>' : ''}</div>
-    <div class="rc-chips" style="margin-bottom:12px">${chip(active.length + ' active')}${CATS.map(c => chip(c + ' ' + active.filter(m => m.category === c).length)).join('')}</div>
+  return `<div class="rc-chips" style="margin-bottom:12px">${chip(active.length + ' active')}${CATS.map(c => chip(c + ' ' + active.filter(m => m.category === c).length)).join('')}</div>
     <div class="filters" style="grid-template-columns:1fr"><label class="f"><span>Search</span><input id="mem-q" type="search" value="${esc(S.q)}" placeholder="Name or rank"></label></div>
     <div id="mem-list">${memList()}</div>`;
+}
+function reqsView() {
+  const list = S.reqs.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name));
+  return `<div class="head-row"><div><h3>Requirements</h3><span class="muted sm">What each category has to keep current.</span></div><button class="btn primary" data-action="req-new">Add requirement</button></div>
+    <div class="card list">${list.length ? list.map(r => `<div class="li${r.active === false ? ' off' : ''}"><div class="t"><b>${esc(r.name)}</b><span class="muted sm">${esc(reqFreqLabel(r))}. Applies to ${esc((r.categories || []).join(', ') || 'no one yet')}.</span></div><div class="acts"><button class="btn sm" data-action="req-edit" data-id="${esc(r.id)}">Edit</button><button class="btn sm" data-action="req-archive" data-id="${esc(r.id)}" data-on="${r.active === false ? '1' : '0'}">${r.active === false ? 'Restore' : 'Archive'}</button></div></div>`).join('') : '<div class="empty">No requirements yet.</div>'}</div>`;
+}
+function membersView() {
+  const tabs = [['roster', 'Roster']]; if (S.perms.manage_members) tabs.push(['reqs', 'Requirements']);
+  if (!tabs.some(t => t[0] === S.mtab)) S.mtab = 'roster';
+  return `<div class="head-row"><h1>Members</h1>${S.mtab === 'roster' && S.perms.manage_members ? '<button class="btn primary" data-action="mem-new">Add member</button>' : ''}</div>
+    ${tabs.length > 1 ? `<div class="subtabs">${tabs.map(([k, l]) => `<button data-action="mtab" data-tab="${k}"${S.mtab === k ? ' aria-current="page"' : ''}>${l}</button>`).join('')}</div>` : ''}
+    ${S.mtab === 'reqs' ? reqsView() : rosterView()}`;
 }
 function memSheet(id) {
   const m = D.memById[id]; if (!m) return '';
@@ -211,7 +226,7 @@ function memSheet(id) {
     <div class="sheet-b"><div class="rc-chips" style="margin-bottom:12px">${chip(m.category || 'No category')}${rankOf(m) ? chip(rankOf(m)) : ''}${probChip(m)}</div>
       ${m.joined || probInfo(m) ? `<div class="sm muted" style="margin:-4px 0 12px">${m.joined ? 'Joined ' + esc(fmt(m.joined)) + (tenure(m.joined) ? ' (' + esc(tenure(m.joined)) + '). ' : '. ') : ''}${esc(probLine(m))}</div>` : ''}
       <div class="sec" style="margin-top:0"><h3>Requirements</h3></div>
-      <div class="card list">${rows.length ? rows.map(reqLine).join('') : `<div class="empty">${canSee ? 'Nothing is required yet.' : 'You can see the directory but not training records.'}</div>`}</div></div>
+      <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${canSee ? 'Nothing is required yet.' : 'You can see the directory but not training records.'}</div>`}</div></div>
     <div class="sheet-f"><button class="btn" data-action="m-close">Close</button>${S.perms.manage_members ? `<button class="btn primary" data-action="mem-edit" data-id="${esc(id)}">Edit</button>` : ''}</div>`;
 }
 
@@ -299,6 +314,72 @@ async function saveMemberForm(form) {
   }
 }
 
+
+/* ---------- requirements (admin) ---------- */
+function reqFormHtml(r) {
+  const x = r || { freq: 'annual', days: 365, categories: [] };
+  return `<div class="sheet-h"><div><h2>${r ? 'Edit requirement' : 'Add requirement'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-req" class="form" data-id="${esc(x.id || '')}">
+      <label class="f"><span>Name</span><input name="name" value="${esc(x.name || '')}" required placeholder="SCBA fit test, CPR, medical clearance"></label>
+      <label class="f"><span>How often</span><select name="freq">${REQ_FREQ_OPTS.map(([k, l]) => `<option value="${k}"${(x.freq || 'annual') === k ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="f" data-days-wrap hidden><span>Every how many days?</span><input name="days" type="number" min="1" value="${esc(x.days || 365)}"></label>
+      <div class="f"><span>Applies to</span><div class="aud">${CATS.map(c => `<label class="chk"><input type="checkbox" name="cat" value="${esc(c)}"${(x.categories || []).includes(c) ? ' checked' : ''}><span>${esc(c)}</span></label>`).join('')}</div></div>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${r ? `<button class="btn danger" data-action="req-archive" data-id="${esc(x.id)}" data-on="${x.active === false ? '1' : '0'}">${x.active === false ? 'Restore' : 'Archive'}</button>` : ''}<button class="btn primary" type="submit" form="f-req">Save</button></div>`;
+}
+function reqFormMount(root) {
+  const sel = root.querySelector('[name=freq]'), w = root.querySelector('[data-days-wrap]'); if (!sel || !w) return;
+  const u = () => { w.hidden = sel.value !== 'custom'; }; sel.addEventListener('change', u); u();
+}
+async function saveReqForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null;
+  const name = String(fd.get('name') || '').trim(); if (!name) { toast('Enter a name.', 'bad'); return; }
+  const freq = fd.get('freq'), days = freqDaysOf(freq, fd.get('days'));
+  const categories = fd.getAll('cat');
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    if (id) { const r = await sb.from('requirements').update({ name, freq, days, categories }).eq('id', id); if (r.error) throw r.error; }
+    else { const r = await sb.from('requirements').insert({ name, freq, days, categories, active: true, sort: (Math.max(0, ...S.reqs.map(x => x.sort || 0)) + 10) }); if (r.error) throw r.error; }
+    MS.pop(); drawModal(); toast('Requirement saved', 'ok'); loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+async function toggleReqArchive(id, turnOn) {
+  const r = await sb.from('requirements').update({ active: turnOn }).eq('id', id);
+  if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+  if (MS.length) { MS.pop(); drawModal(); }
+  toast(turnOn ? 'Requirement restored' : 'Requirement archived. Records are kept.', 'ok'); loadAll();
+}
+
+/* ---------- recording a training completion ---------- */
+function recordFormHtml(memberId, req) {
+  return `<div class="sheet-h"><div><h2>Record ${esc(req.name)}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-rec" class="form" data-member="${esc(memberId)}" data-req="${esc(req.id)}">
+      <div class="two"><label class="f"><span>Date done</span><input name="done_on" type="date" max="${today()}" value="${today()}" required></label>
+        <label class="f"><span>Result</span><select name="result"><option value="">Not recorded</option><option>Pass</option><option>Fail</option><option>Cleared</option><option>Not cleared</option></select></label></div>
+      <label class="f"><span>Next due</span><input name="due_on" type="date" value="${freqDaysOf(req.freq, req.days) ? addDays(today(), freqDaysOf(req.freq, req.days)) : ''}"></label>
+      <label class="f"><span>Notes</span><textarea name="notes"></textarea></label>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button><button class="btn primary" type="submit" form="f-rec">Save</button></div>`;
+}
+function recordFormMount(root, req) {
+  const f = root.querySelector('#f-rec'); if (!f) return;
+  let touched = false; f.elements.due_on.addEventListener('input', () => { touched = true; });
+  f.elements.done_on.addEventListener('change', () => {
+    if (touched) return;
+    const d = freqDaysOf(req.freq, req.days);
+    f.elements.due_on.value = d ? addDays(f.elements.done_on.value, d) : '';
+  });
+}
+async function saveRecordForm(form) {
+  const fd = new FormData(form), memberId = form.dataset.member, reqId = form.dataset.req;
+  const done_on = fd.get('done_on'); if (!done_on) { toast('Choose the date it was done.', 'bad'); return; }
+  const payload = { member_id: memberId, requirement_id: reqId, done_on, due_on: fd.get('due_on') || null, approx: false, result: fd.get('result') || '', notes: String(fd.get('notes') || '').trim(), recorded_by: S.me.id };
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  const r = await sb.from('member_records').insert(payload);
+  if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); if (btn) btn.disabled = false; return; }
+  MS.pop(); drawModal(); toast('Record saved', 'ok'); loadAll();
+}
+
 /* ---------- rendering ---------- */
 function renderTabs() {
   const el = $('#tabs'), who = $('#who');
@@ -337,13 +418,13 @@ async function loadAll() {
     const uid = session.user.id;
     const [m, rq, st, ms, ds] = await Promise.all([
       sb.from('members').select('*').order('name'),
-      sb.from('requirements').select('*').order('sort'),
+      sb.from('requirements').select('*').order('sort'),  // all rows, including archived; reqRows() filters active ones
       sb.from('settings').select('*').eq('id', 1).maybeSingle(),
       sb.from('messages').select('*').eq('removed', false).order('created_at', { ascending: false }),
       sb.from('message_dismissals').select('message_id')
     ]);
     for (const r of [m, rq, st, ms, ds]) if (r.error) throw r.error;
-    S.members = m.data || []; S.reqs = (rq.data || []).filter(r => r.active); S.settings = st.data || { probation_months: 6 };
+    S.members = m.data || []; S.reqs = rq.data || []; S.settings = st.data || { probation_months: 6 };
     S.messages = ms.data || []; S.dismissed = new Set((ds.data || []).map(x => x.message_id));
     S.me = S.members.find(x => x.user_id === uid) || null; S.access = null; S.priv = null; S.perms = {}; S.records = [];
     if (S.me) {
@@ -372,6 +453,11 @@ document.addEventListener('click', async e => {
   else if (a === 'mem-open') { const id = el.dataset.id; MS.push(() => memSheet(id)); drawModal(); }
   else if (a === 'mem-new') { openMemberForm(null); }
   else if (a === 'mem-edit') { if (MS.length) MS.pop(); openMemberForm(el.dataset.id); }
+  else if (a === 'mtab') { S.mtab = el.dataset.tab; render(); }
+  else if (a === 'req-new') { MS.push(() => reqFormHtml(null)); drawModal(); reqFormMount($('#modal-root')); }
+  else if (a === 'req-edit') { const r = S.reqs.find(x => x.id === el.dataset.id); if (r) { if (MS.length) MS.pop(); MS.push(() => reqFormHtml(r)); drawModal(); reqFormMount($('#modal-root')); } }
+  else if (a === 'req-archive') { toggleReqArchive(el.dataset.id, el.dataset.on === '1'); }
+  else if (a === 'rec-new') { const req = S.reqs.find(x => x.id === el.dataset.req); if (req) { MS.push(() => recordFormHtml(el.dataset.member, req)); drawModal(); recordFormMount($('#modal-root'), req); } }
   else if (a === 'm-close') { MS.pop(); drawModal(); }
   else if (a === 'dismiss') {
     const id = el.dataset.id; S.dismissed.add(id); render();
@@ -384,6 +470,8 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('submit', async e => {
   if (e.target.id === 'f-mem') { e.preventDefault(); saveMemberForm(e.target); return; }
+  if (e.target.id === 'f-req') { e.preventDefault(); saveReqForm(e.target); return; }
+  if (e.target.id === 'f-rec') { e.preventDefault(); saveRecordForm(e.target); return; }
   if (e.target.id !== 'f-signin') return;
   e.preventDefault();
   const fd = new FormData(e.target), btn = e.target.querySelector('button[type=submit]');
