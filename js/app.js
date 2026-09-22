@@ -1,6 +1,61 @@
 (function () {
 'use strict';
 
+/* ---------- push notifications & install ---------- */
+// This is a public key, meant to be embedded in the website. The matching
+// private key lives only in the Supabase Edge Function's secrets.
+const VAPID_PUBLIC_KEY = 'BPbkERMctiDTWBUgHbXHZy1eUY6vRb6tb1Z79SexWW33uM7yebH7DPQVoDgDURXokC_WQ5ApM1DsoteuWXELAtE';
+function urlBase64ToUint8Array(base64) {
+  const pad = '='.repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIOS = () => /iP(hone|od|ad)/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+const isStandalone = () => (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true;
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstallPrompt = e; render(); });
+window.addEventListener('appinstalled', () => { deferredInstallPrompt = null; render(); });
+async function registerSW() { if (!pushSupported()) return null; try { return await navigator.serviceWorker.register('sw.js'); } catch (e) { return null; } }
+async function currentPushSub() { if (!pushSupported()) return null; try { const reg = await navigator.serviceWorker.ready; return await reg.pushManager.getSubscription(); } catch (e) { return null; } }
+async function refreshPushState() {
+  if (!pushSupported()) { S.pushState = 'unsupported'; return; }
+  if (Notification.permission === 'denied') { S.pushState = 'denied'; return; }
+  const sub = await currentPushSub();
+  S.pushState = sub ? 'on' : 'off';
+}
+async function enablePush() {
+  if (!S.me) return;
+  try {
+    await registerSW();
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { S.pushState = perm === 'denied' ? 'denied' : 'off'; render(); if (perm === 'denied') toast('Notifications are blocked for this site in your browser settings.', 'bad'); return; }
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+    const j = sub.toJSON();
+    const r = await sb.from('push_subscriptions').upsert({ member_id: S.me.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: 'endpoint' });
+    if (r.error) throw r.error;
+    S.pushState = 'on'; toast('Notifications are on', 'ok'); render();
+  } catch (e) { toast('Could not turn on notifications: ' + ((e && e.message) || String(e)), 'bad'); }
+}
+async function disablePush() {
+  try {
+    const sub = await currentPushSub();
+    if (sub) { await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint); await sub.unsubscribe(); }
+    S.pushState = 'off'; toast('Notifications are off', 'ok'); render();
+  } catch (e) { toast('Could not turn off notifications: ' + ((e && e.message) || String(e)), 'bad'); }
+}
+function pushCardHtml() {
+  if (!S.me || !pushSupported()) return '';
+  if (isIOS() && !isStandalone()) {
+    return `<div class="card pad stack" style="gap:8px;margin-bottom:14px"><b>Get notifications on this iPhone</b><span class="sm muted">Tap the Share icon in Safari, then "Add to Home Screen". Open the app from that icon, then come back here to turn notifications on.</span></div>`;
+  }
+  const installBtn = deferredInstallPrompt ? `<button class="btn sm" data-action="install-app">Add to home screen</button>` : '';
+  if (S.pushState === 'on') return `<div class="card pad spread" style="margin-bottom:14px"><span>Notifications are on for this device.</span><button class="btn sm" data-action="push-off">Turn off</button></div>`;
+  if (S.pushState === 'denied') return `<div class="card pad" style="margin-bottom:14px"><span class="sm muted">Notifications are blocked for this site. Check your browser's site settings to allow them.</span></div>`;
+  return `<div class="card pad spread" style="margin-bottom:14px"><span>Get a notification when there's an urgent message.</span><span class="row">${installBtn}<button class="btn sm primary" data-action="push-on">Turn on notifications</button></span></div>`;
+}
+
 /* ---------- small helpers ---------- */
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -87,7 +142,7 @@ function tenure(j) {
 let sb = null, session = null;
 const S = {
   loading: true, error: '', fatal: '', me: null, access: null, priv: null, perms: {}, settings: { probation_months: 6 },
-  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true }
+  members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true }, pushState: 'unsupported'
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
@@ -185,6 +240,7 @@ function homeView() {
   const p = S.priv || {};
   const dep = m.joined || probInfo(m) ? `<div class="sm muted" style="margin-top:6px">${m.joined ? 'Joined ' + esc(fmt(m.joined)) + (tenure(m.joined) ? ' (' + esc(tenure(m.joined)) + '). ' : '. ') : ''}${esc(probLine(m))}</div>` : '';
   return `${ribbonHtml()}${alert ? `<div class="ribbons">${alert}</div>` : ''}
+    ${pushCardHtml()}
     <div class="head-row"><div><h1>Hello, ${esc(first(m.name))}</h1>
       <div class="rc-chips" style="margin-top:6px">${chip(m.category || 'No category set')}${rankOf(m) ? chip(rankOf(m)) : ''}${probChip(m)}${S.access ? chip(roleLabel()) : ''}</div>${dep}
       ${p.nys_id ? `<div class="sm muted" style="margin-top:6px">NYS training ID: <b style="color:var(--ink)">${esc(p.nys_id)}</b></div>` : ''}</div></div>
@@ -438,16 +494,19 @@ function msgFormHtml(m) {
       <div class="f"><span>Who sees it</span><div class="aud"><label class="chk"><input type="checkbox" name="aud_all" data-aud="all"${all ? ' checked' : ''}><span>Everyone</span></label>${CATS.map(c => `<label class="chk"><input type="checkbox" name="cat" value="${esc(c)}" data-aud="cat"${!all && (x.aud_cats || []).includes(c) ? ' checked' : ''}${all ? ' disabled' : ''}><span>${esc(c)}</span></label>`).join('')}</div></div>
       <div class="two"><label class="f"><span>Show from</span><input name="starts_on" type="date" value="${esc(x.starts_on || today())}"></label><label class="f"><span>Show until</span><input name="ends_on" type="date" value="${esc(x.ends_on || '')}"></label></div>
       <div class="muted sm" style="margin-top:-6px">Leave "until" empty to keep it up until you end it. Urgent messages can't be dismissed by members.</div>
+      ${m ? '' : `<label class="chk"><input type="checkbox" name="push"${(x.tone || 'info') === 'urgent' ? ' checked' : ''}>Also send a push notification to members who have turned them on</label>`}
     </form></div>
     <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-msg', m ? 'Save' : 'Post message')}</div>`;
 }
 function msgFormMount(root) {
-  const all = root.querySelector('[data-aud=all]'); if (!all) return;
-  const cats = [...root.querySelectorAll('[data-aud=cat]')];
-  all.addEventListener('change', () => { cats.forEach(c => { c.disabled = all.checked; if (all.checked) c.checked = false; }); });
+  const all = root.querySelector('[data-aud=all]');
+  if (all) { const cats = [...root.querySelectorAll('[data-aud=cat]')]; all.addEventListener('change', () => { cats.forEach(c => { c.disabled = all.checked; if (all.checked) c.checked = false; }); }); }
+  const tone = root.querySelector('[name=tone]'), push = root.querySelector('[name=push]');
+  if (tone && push) { let touched = false; push.addEventListener('change', () => { touched = true; }); tone.addEventListener('change', () => { if (!touched) push.checked = tone.value === 'urgent'; }); }
 }
 async function saveMsgForm(form) {
   const fd = new FormData(form), id = form.dataset.id || null;
+  const sendPush = !id && !!fd.get('push');
   const body = String(fd.get('body') || '').trim(); if (!body) { toast('Write a message first.', 'bad'); return; }
   const audAll = !!fd.get('aud_all'), cats = fd.getAll('cat');
   if (!audAll && !cats.length) { toast('Choose who should see this message.', 'bad'); return; }
@@ -459,6 +518,13 @@ async function saveMsgForm(form) {
     if (id) { const r = await sb.from('messages').update(payload).eq('id', id); if (r.error) throw r.error; }
     else { const r = await sb.from('messages').insert({ ...payload, by_member: S.me.id, removed: false }); if (r.error) throw r.error; }
     MS.pop(); drawModal(); toast(id ? 'Message saved' : 'Message posted', 'ok'); loadAll();
+    if (sendPush) {
+      try {
+        const r = await sb.functions.invoke('send-push', { body: { title: 'Great Bend Fire Department', body, aud_all: payload.aud_all, aud_cats: payload.aud_cats } });
+        if (r.error) throw r.error;
+        toast(`Notification sent to ${r.data && r.data.sent || 0} device(s)`, 'ok');
+      } catch (e) { toast('Message posted, but the push notification could not be sent: ' + ((e && e.message) || String(e)), 'bad'); }
+    }
   } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
 }
 async function endMsgNow(id) {
@@ -567,6 +633,9 @@ document.addEventListener('click', async e => {
   else if (a === 'msg-end') { endMsgNow(el.dataset.id); }
   else if (a === 'msg-remove') { removeMsg(el.dataset.id); }
   else if (a === 'od-copyall') { copyText(odAllText()); }
+  else if (a === 'push-on') { enablePush(); }
+  else if (a === 'push-off') { disablePush(); }
+  else if (a === 'install-app') { if (deferredInstallPrompt) { deferredInstallPrompt.prompt(); deferredInstallPrompt = null; } }
   else if (a === 'copy') { copyText(el.dataset.v || ''); }
   else if (a === 'm-close') { MS.pop(); drawModal(); }
   else if (a === 'dismiss') {
@@ -609,7 +678,7 @@ async function boot() {
   });
   const { data } = await sb.auth.getSession();
   session = data && data.session ? data.session : null;
-  if (session) loadAll(); else { S.loading = false; render(); }
+  if (session) { registerSW(); loadAll().then(refreshPushState).then(render); } else { S.loading = false; render(); }
 }
 boot();
 })();
