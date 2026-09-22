@@ -338,7 +338,16 @@ function memSheet(id) {
       ${m.joined || probInfo(m) ? `<div class="sm muted" style="margin:-4px 0 12px">${m.joined ? 'Joined ' + esc(fmt(m.joined)) + (tenure(m.joined) ? ' (' + esc(tenure(m.joined)) + '). ' : '. ') : ''}${esc(probLine(m))}</div>` : ''}
       <div class="sec" style="margin-top:0"><h3>Requirements</h3></div>
       <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${canSee ? 'Nothing is required yet.' : 'You can see the directory but not training records.'}</div>`}</div></div>
-    <div class="sheet-f"><button class="btn" data-action="m-close">Close</button>${S.perms.manage_members ? `<button class="btn primary" data-action="mem-edit" data-id="${esc(id)}">Edit</button>` : ''}</div>`;
+    <div class="sheet-f"><button class="btn" data-action="m-close">Close</button>${S.perms.admin_setup ? `<button class="btn danger" data-action="mem-delete" data-id="${esc(id)}">Delete</button>` : ''}${S.perms.manage_members ? `<button class="btn primary" data-action="mem-edit" data-id="${esc(id)}">Edit</button>` : ''}</div>`;
+}
+async function deleteMember(id) {
+  const m = D.memById[id]; if (!m) return;
+  if (id === S.me.id) { toast("You can't delete your own account while signed in as them.", 'bad'); return; }
+  const ok = window.confirm(`Delete ${m.name}?\n\nThis permanently removes their member record and every training record tied to them. It cannot be undone.\n\nIf they've simply left the department, cancel this and use Inactive instead (Edit, then set Status to Inactive) -- that keeps their history.`);
+  if (!ok) return;
+  const r = await sb.from('members').delete().eq('id', id);
+  if (r.error) { toast('Could not delete: ' + r.error.message, 'bad'); return; }
+  MS.length = 0; drawModal(); toast('Member deleted', 'ok'); loadAll();
 }
 
 
@@ -887,7 +896,13 @@ async function saveEqForm(form) {
   const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
   try {
     if (id) { const r = await sb.from('equipment').update(data).eq('id', id); if (r.error) throw r.error; }
-    else { const r = await sb.from('equipment').insert({ ...data, status: 'in_service' }); if (r.error) throw r.error; }
+    else {
+      const r = await sb.from('equipment').insert({ ...data, status: 'in_service' }).select('id').single(); if (r.error) throw r.error;
+      // Every new item gets a basic presence check automatically, so it shows up on the rig's check sheet without extra setup.
+      // It's an ordinary checklist item from here on -- edit its wording or frequency, or archive it, the same as any other check.
+      const ir = await sb.from('checklist_items').insert({ scope_type: 'equipment', equipment_id: r.data.id, name: 'Present and accounted for', freq: 'monthly', days: 30, sort: 5, active: true });
+      if (ir.error) toast('Equipment saved, but its check could not be added: ' + ir.error.message, 'bad');
+    }
     MS.pop(); drawModal(); toast('Equipment saved', 'ok'); loadAll();
   } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
 }
@@ -1226,6 +1241,7 @@ document.addEventListener('click', async e => {
   else if (a === 'mem-open') { const id = el.dataset.id; MS.push(() => memSheet(id)); drawModal(); }
   else if (a === 'mem-new') { openMemberForm(null); }
   else if (a === 'mem-edit') { if (MS.length) MS.pop(); openMemberForm(el.dataset.id); }
+  else if (a === 'mem-delete') { deleteMember(el.dataset.id); }
   else if (a === 'mtab') { S.mtab = el.dataset.tab; render(); }
   else if (a === 'req-new') { MS.push(() => reqFormHtml(null)); drawModal(); reqFormMount($('#modal-root')); }
   else if (a === 'req-edit') { const r = S.reqs.find(x => x.id === el.dataset.id); if (r) { if (MS.length) MS.pop(); MS.push(() => reqFormHtml(r)); drawModal(); reqFormMount($('#modal-root')); } }
