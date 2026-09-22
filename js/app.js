@@ -167,14 +167,16 @@ const S = {
   loading: true, error: '', fatal: '', me: null, access: null, priv: null, perms: {}, settings: { probation_months: 6 },
   members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true },
   rigs: [], equipment: [], items: [], sessions: [], results: [], defs: [],
-  rigId: null, rsub: 'checks', eq: { q: '', where: 'all', cat: 'all', ret: false }, showArch: {}, showBase: {}, defShow: 'open', pushState: 'unsupported', pushError: ''
+  rigId: null, rsub: 'checks', eq: { q: '', where: 'all', cat: 'all', ret: false }, showArch: {}, showBase: {}, defShow: 'open',
+  audit: null, auditLoading: false, auditError: '', pushState: 'unsupported', pushError: ''
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
 
 function resetState() {
   S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.mtab = 'roster'; S.q = ''; S.od = { none: true, soon: true }; S.error = '';
-  S.rigs = []; S.equipment = []; S.items = []; S.sessions = []; S.results = []; S.defs = []; S.rigId = null; S.rsub = 'checks'; S.eq = { q: '', where: 'all', cat: 'all', ret: false }; S.showArch = {}; S.showBase = {}; S.defShow = 'open'; S.loading = false;
+  S.rigs = []; S.equipment = []; S.items = []; S.sessions = []; S.results = []; S.defs = []; S.rigId = null; S.rsub = 'checks'; S.eq = { q: '', where: 'all', cat: 'all', ret: false }; S.showArch = {}; S.showBase = {}; S.defShow = 'open';
+  S.audit = null; S.auditLoading = false; S.auditError = ''; S.loading = false;
   D = { latest: {}, memById: {} }; MS.length = 0;
 }
 
@@ -1046,8 +1048,93 @@ const RIGACTIONS = {
   'it-showarch': el => { S.showArch[el.dataset.key] = !S.showArch[el.dataset.key]; render(); },
   'def-edit': el => { const d = S.defs.find(x => x.id === el.dataset.id); if (d) { MS.push(() => defFormHtml(d)); drawModal(); } },
   'def-close': el => closeDef(el.dataset.id, true),
-  'def-reopen': el => closeDef(el.dataset.id, false)
+  'def-reopen': el => closeDef(el.dataset.id, false),
+  'exp-rigs': () => exportRigs(),
+  'exp-equipment': () => exportEquipment(),
+  'exp-checks': () => exportChecks(),
+  'exp-defs': () => exportDefs(),
+  'exp-members': () => exportMembers(),
+  'exp-backup': () => exportFullBackup()
 };
+
+/* ---------- records: exports and the change log ---------- */
+const csvOf = rows => rows.map(r => r.map(v => { v = v == null ? '' : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(',')).join('\r\n');
+function downloadText(filename, text, mime) {
+  const blob = new Blob([text], { type: mime || 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+function exportRigs() {
+  const rows = [['Unit', 'Type', 'Captain', 'Year', 'Make', 'Model', 'VIN', 'Plate', 'Purchase date', 'Purchase amount', 'Estimated value', 'Status', 'Mileage or hours', 'Tracked inspections', 'Notes']];
+  for (const r of S.rigs.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0)))
+    rows.push([r.unit, r.type, r.captain, r.year, r.make, r.model, r.vin, r.plate, r.purchase_date || (r.purchase_date_unknown ? 'Unknown' : ''), hasAmt(r) ? r.purchase_amount : (r.purchase_amount_unknown ? 'Unknown' : ''), r.est_value, r.archived ? 'Archived' : r.status, r.meter, (r.tracked || []).join('; '), r.notes]);
+  downloadText(`rigs-${today()}.csv`, csvOf(rows));
+}
+function exportEquipment() {
+  const rows = [['Name', 'Category', 'Assigned to', 'Location', 'Serial number', 'Make and model', 'Purchase date', 'Purchase amount', 'Estimated value', 'Purchased from', 'Status', 'Retired date', 'Retired note', 'Tracked inspections', 'Notes']];
+  for (const e of S.equipment.slice().sort((a, b) => a.name.localeCompare(b.name)))
+    rows.push([e.name, e.category, whereLabel2(e), e.location, e.serial, e.make_model, e.purchase_date || (e.purchase_date_unknown ? 'Unknown' : ''), hasAmt(e) ? e.purchase_amount : (e.purchase_amount_unknown ? 'Unknown' : ''), e.est_value, e.vendor, e.status, e.retired_date, e.retire_note, (e.tracked || []).join('; '), e.notes]);
+  downloadText(`equipment-${today()}.csv`, csvOf(rows));
+}
+function exportChecks() {
+  const rows = [['Date', 'Rig', 'Checked by', 'Mileage or hours', 'Item', 'Equipment', 'Status', 'Comment']];
+  for (const s of S.sessions.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '')))
+    for (const r of (D.resBySession[s.id] || [])) rows.push([s.date, s.rig_id ? rigName(s.rig_id) : 'Station', s.by_name, s.meter, r.item_name, r.equipment_name, SL[r.status] || r.status, r.comment]);
+  downloadText(`check-history-${today()}.csv`, csvOf(rows));
+}
+function exportDefs() {
+  const rows = [['Rig', 'Item', 'Equipment', 'Status', 'Comment', 'Found', 'Found by', 'Reported to', 'Date reported', 'Back in service', 'Closed', 'Notes']];
+  for (const d of S.defs.slice().sort((a, b) => (a.found_date || '').localeCompare(b.found_date || '')))
+    rows.push([d.rig_id ? rigName(d.rig_id) : 'Station', d.item_name, d.equipment_name, SL[d.status] || d.status, d.comment, d.found_date, d.found_by, d.reported_to, d.date_reported, d.back_date, d.closed ? 'Yes' : 'No', d.note]);
+  downloadText(`deficiencies-${today()}.csv`, csvOf(rows));
+}
+async function exportMembers() {
+  toast('Preparing export…');
+  try {
+    const [priv, access] = await Promise.all([sb.from('member_private').select('*'), sb.from('member_access').select('*')]);
+    if (priv.error) throw priv.error; if (access.error) throw access.error;
+    const privById = Object.fromEntries((priv.data || []).map(p => [p.member_id, p]));
+    const accById = Object.fromEntries((access.data || []).map(a => [a.member_id, a]));
+    const rows = [['Name', 'NYS training ID', 'Rank', 'Category', 'Role', 'Status', 'Joined']];
+    for (const m of S.members.slice().sort((a, b) => a.name.localeCompare(b.name)))
+      rows.push([m.name, (privById[m.id] || {}).nys_id || '', rankOf(m), m.category, roleLabelOf(effPerms(accById[m.id])), m.status, m.joined]);
+    downloadText(`members-${today()}.csv`, csvOf(rows));
+    toast('Export ready', 'ok');
+  } catch (e) { toast('Could not export: ' + ((e && e.message) || String(e)), 'bad'); }
+}
+async function exportFullBackup() {
+  toast('Preparing backup…');
+  try {
+    const [priv, access, audit] = await Promise.all([
+      sb.from('member_private').select('*'), sb.from('member_access').select('*'), sb.from('audit_log').select('*').order('at', { ascending: false }).limit(2000)
+    ]);
+    for (const r of [priv, access, audit]) if (r.error) throw r.error;
+    const backup = {
+      exported_at: new Date().toISOString(),
+      rigs: S.rigs, equipment: S.equipment, checklist_items: S.items, check_sessions: S.sessions, check_results: S.results, deficiencies: S.defs,
+      members: S.members, member_private: priv.data, member_access: access.data, requirements: S.reqs, member_records: S.records, messages: S.messages, audit_log: audit.data
+    };
+    downloadText(`gbfd-backup-${today()}.json`, JSON.stringify(backup, null, 2), 'application/json');
+    toast('Backup ready', 'ok');
+  } catch (e) { toast('Could not prepare the backup: ' + ((e && e.message) || String(e)), 'bad'); }
+}
+async function loadAudit() {
+  S.auditLoading = true; render();
+  try {
+    const r = await sb.from('audit_log').select('*').order('at', { ascending: false }).limit(200);
+    if (r.error) throw r.error;
+    S.audit = r.data || [];
+  } catch (e) { S.auditError = (e && e.message) || String(e); }
+  S.auditLoading = false; render();
+}
+function recordsView() {
+  return `<div class="head-row"><h1>Records</h1></div>
+    <div class="card pad" style="margin-bottom:14px"><h3>Exports</h3><p class="muted sm" style="margin:4px 0 12px">Spreadsheet files for anyone who asks to see your records, plus a full backup you can keep.</p>
+      <div class="row"><button class="btn" data-action="exp-rigs">Rigs</button><button class="btn" data-action="exp-equipment">Equipment</button><button class="btn" data-action="exp-checks">Check history</button><button class="btn" data-action="exp-defs">Deficiencies</button><button class="btn" data-action="exp-members">Members</button><button class="btn primary" data-action="exp-backup">Full backup</button></div></div>
+    <div class="sec"><h3>Change log</h3><span class="muted sm">Who changed what, newest first.</span></div>
+    <div class="card list">${S.auditError ? `<div class="empty">Could not load the change log: ${esc(S.auditError)}</div>` : S.audit === null || S.auditLoading ? '<div class="empty">Loading…</div>' : S.audit.length ? S.audit.map(a => `<div class="li"><div class="t"><b>${esc(a.action)}</b><span class="muted sm">${esc(a.what)}</span></div><span class="muted sm" style="text-align:right">${esc(new Date(a.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}${a.actor_name ? '<br>' + esc(a.actor_name) : ''}</span></div>`).join('') : '<div class="empty">No changes logged yet.</div>'}</div>`;
+}
 
 /* ---------- rendering ---------- */
 function renderTabs() {
@@ -1056,7 +1143,7 @@ function renderTabs() {
   const T = (k, l) => `<button data-action="tab" data-tab="${k}"${S.tab === k ? ' aria-current="page"' : ''}>${l}</button>`;
   const showMem = S.perms.view_roster || S.perms.manage_members;
   const showApp = S.perms.view_apparatus;
-  el.innerHTML = T('home', 'Home') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '');
+  el.innerHTML = T('home', 'Home') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '') + (S.perms.admin_setup ? T('records', 'Records') : '');
   who.innerHTML = `<button class="btn sm" data-action="signout">Sign out</button>`;
 }
 function render() {
@@ -1069,7 +1156,8 @@ function render() {
   if (!S.me) { v.innerHTML = unlinkedView(); renderTabs(); return; }
   let tab = S.tab; if (tab === 'members' && !(S.perms.view_roster || S.perms.manage_members)) tab = 'home';
   if ((tab === 'rigs' || tab === 'equipment') && !S.perms.view_apparatus) tab = 'home';
-  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : homeView());
+  if (tab === 'records' && !S.perms.admin_setup) tab = 'home';
+  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : tab === 'records' ? recordsView() : homeView());
   renderTabs();
   drawModal();
 }
@@ -1132,7 +1220,7 @@ async function loadAll() {
 document.addEventListener('click', async e => {
   const el = e.target.closest('[data-action]'); if (!el) return;
   const a = el.dataset.action;
-  if (a === 'tab') { S.tab = el.dataset.tab; if (S.tab === 'rigs') S.rigId = null; render(); window.scrollTo(0, 0); }
+  if (a === 'tab') { S.tab = el.dataset.tab; if (S.tab === 'rigs') S.rigId = null; if (S.tab === 'records' && S.audit === null && !S.auditLoading) loadAudit(); render(); window.scrollTo(0, 0); }
   else if (a === 'signout') { await sb.auth.signOut(); }
   else if (a === 'reload') { loadAll(); }
   else if (a === 'mem-open') { const id = el.dataset.id; MS.push(() => memSheet(id)); drawModal(); }
