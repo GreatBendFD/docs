@@ -1104,6 +1104,16 @@ const RIGACTIONS = {
   'ev-addwho': el => { MS.push(() => evAddSheet(el.dataset.id)); drawModal(); },
   'ev-cancel': async el => { const e = S.events.find(x => x.id === el.dataset.id); if (!e) return; if (MS.length) { MS.pop(); drawModal(); } const r = await sb.from('events').update({ cancelled: !e.cancelled }).eq('id', e.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast(e.cancelled ? 'Event reopened' : 'Event cancelled', 'ok'); loadAll(); },
   'ev-del': async el => { const e = S.events.find(x => x.id === el.dataset.id); if (!e) return; if (!window.confirm('Delete this event? It disappears for everyone. Cancel it instead if people already signed up.')) return; if (MS.length) { MS.length = 0; drawModal(); } const r = await sb.from('events').update({ removed: true }).eq('id', e.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast('Event deleted', 'ok'); loadAll(); },
+  'ev-del-series': async el => {
+    const series = el.dataset.series;
+    const rows = S.events.filter(x => x.series === series && !x.removed);
+    if (!rows.length) return;
+    if (!window.confirm(`Delete all ${rows.length} events in this series? This removes every occurrence, not just this one. It cannot be undone.`)) return;
+    if (MS.length) { MS.length = 0; drawModal(); }
+    const r = await sb.from('events').update({ removed: true }).eq('series', series);
+    if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+    toast(`Deleted ${rows.length} events`, 'ok'); loadAll();
+  },
   'tr-new': () => { MS.push(() => trFormHtml(null)); drawModal(); },
   'tr-edit': el => { const t = S.trainings.find(x => x.id === el.dataset.id); if (t) { if (MS.length) MS.pop(); MS.push(() => trFormHtml(t)); drawModal(); } },
   'tr-open': el => { MS.push(() => trDetailSheet(el.dataset.id)); drawModal(); },
@@ -1400,7 +1410,7 @@ function evFormHtml(e) {
       <label class="chk"><input type="checkbox" name="announce" checked>Also post a message on everyone's home page</label>`}
       <datalist id="dl-evcat">${EV_CATS.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
     </form></div>
-    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${e ? `<button class="btn danger" data-action="ev-cancel" data-id="${esc(x.id)}">${x.cancelled ? 'Reopen' : 'Cancel event'}</button><button class="btn danger" data-action="ev-del" data-id="${esc(x.id)}">Delete</button>` : ''}${saveBtn('f-ev')}</div>`;
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${e ? `<button class="btn danger" data-action="ev-cancel" data-id="${esc(x.id)}">${x.cancelled ? 'Reopen' : 'Cancel event'}</button><button class="btn danger" data-action="ev-del" data-id="${esc(x.id)}">Delete</button>${x.series ? `<button class="btn danger" data-action="ev-del-series" data-series="${esc(x.series)}">Delete this and every event in the series</button>` : ''}` : ''}${saveBtn('f-ev')}</div>`;
 }
 const EV_CATS = ['Training', 'Meeting', 'Drill', 'Detail or standby', 'Fundraiser', 'Community event', 'Other'];
 function evFormMount(root) {
