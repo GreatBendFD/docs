@@ -575,7 +575,7 @@ async function saveMsgForm(form) {
     if (sendPush) {
       try {
         const r = await sb.functions.invoke('send-push', { body: { title: 'Great Bend Fire Department', body, aud_all: payload.aud_all, aud_cats: payload.aud_cats } });
-        if (r.error) throw r.error;
+        if (r.error) { r.error.message = await functionErrorMessage(r.error); throw r.error; }
         toast(`Notification sent to ${r.data && r.data.sent || 0} device(s)`, 'ok');
       } catch (e) { toast('Message posted, but the push notification could not be sent: ' + ((e && e.message) || String(e)), 'bad'); }
     }
@@ -1143,12 +1143,24 @@ async function loadAudit() {
   } catch (e) { S.auditError = (e && e.message) || String(e); }
   S.auditLoading = false; render();
 }
+// supabase-js only gives a generic "non-2xx status code" message by default --
+// the function's own, more specific error message is in the response body,
+// which has to be read separately.
+async function functionErrorMessage(error) {
+  try {
+    if (error && error.context && typeof error.context.json === 'function') {
+      const j = await error.context.json();
+      if (j && j.error) return j.error;
+    }
+  } catch (e2) {}
+  return (error && error.message) || String(error);
+}
 async function sendInvites(memberIds) {
   const body = memberIds ? { member_ids: memberIds } : {};
   toast('Sending invites…');
   try {
     const r = await sb.functions.invoke('invite-members', { body });
-    if (r.error) throw r.error;
+    if (r.error) { r.error.message = await functionErrorMessage(r.error); throw r.error; }
     const d = r.data || {};
     if (d.note) toast(d.note, 'ok');
     else toast(`Invited ${d.invited || 0} member(s)${d.failed ? `, ${d.failed} could not be reached -- check the change log or try again` : ''}`, d.failed ? 'bad' : 'ok');
