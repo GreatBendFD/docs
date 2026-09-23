@@ -1,6 +1,15 @@
 (function () {
 'use strict';
 
+// Read this the moment the script runs, before Supabase's own client
+// touches the address bar -- it clears this part of the URL as soon as it
+// starts up. An invite or a password-reset link both land here carrying
+// "type=invite" or "type=recovery" in this same spot; that's how the app
+// tells "you just clicked one of those links" apart from an ordinary
+// sign-in, without depending on which particular library event fires for
+// which link type -- something not worth guessing at.
+const AUTH_LINK_TYPE = new URLSearchParams((window.location.hash || '').replace(/^#/, '')).get('type');
+
 /* ---------- push notifications & install ---------- */
 // This is a public key, meant to be embedded in the website. The matching
 // private key lives only in the Supabase Edge Function's secrets.
@@ -178,6 +187,7 @@ const S = {
   rigs: [], equipment: [], items: [], sessions: [], results: [], defs: [],
   rigId: null, rsub: 'checks', eq: { q: '', where: 'all', cat: 'all', ret: false }, showArch: {}, showBase: {}, defShow: 'open',
   audit: null, auditLoading: false, auditError: '', pushState: 'unsupported', pushError: '',
+  needsPassword: AUTH_LINK_TYPE === 'invite' || AUTH_LINK_TYPE === 'recovery', pwSaving: false, pwError: '', forgotSent: false,
   events: [], signups: [], trainings: [], attendanceRows: [], eventAttendanceRows: [], ev: { month: '', day: '', past: false },
   threads: [], replies: [], boardReads: [], brdBoard: null, brdThread: null
 };
@@ -286,7 +296,41 @@ function signInView(err) {
       ${err ? `<div class="banner">${esc(err)}</div>` : ''}
       <button class="btn primary" type="submit">Sign in</button>
     </form>
-    <p class="muted sm">Need access or forgot your password? Ask an administrator.</p></div>`);
+    ${S.forgotSent ? `<div class="banner" style="background:var(--surface-2)">If that email has an account, a reset link is on its way. Check your inbox in a minute or two.</div>` : `<button class="btn ghost sm" data-action="forgot-pw" style="align-self:flex-start;padding-left:0">Forgot your password?</button>`}
+    <p class="muted sm">Need access? Ask an administrator.</p></div>`);
+}
+async function saveNewPassword(form) {
+  const fd = new FormData(form), pw1 = fd.get('pw1'), pw2 = fd.get('pw2');
+  if (pw1 !== pw2) { S.pwError = "Those two don't match. Try again."; render(); return; }
+  if (String(pw1).length < 8) { S.pwError = 'Use at least 8 characters.'; render(); return; }
+  S.pwSaving = true; S.pwError = ''; render();
+  const r = await sb.auth.updateUser({ password: pw1 });
+  S.pwSaving = false;
+  if (r.error) { S.pwError = r.error.message || 'Could not save that password.'; render(); return; }
+  S.needsPassword = false; toast('Password set', 'ok');
+  if (window.history && window.history.replaceState) window.history.replaceState(null, '', window.location.pathname);
+  if (S.me === null && !S.loading) loadAll(); else render();
+}
+async function requestPasswordReset(email) {
+  if (!email) { toast('Enter your email above first, then tap this again.', 'bad'); return; }
+  const redirectTo = window.location.origin + window.location.pathname;
+  const r = await sb.auth.resetPasswordForEmail(email, { redirectTo });
+  // Supabase does not say whether that email exists, on purpose -- it always
+  // reports success so a stranger can't use this to find out who has an
+  // account here.
+  S.forgotSent = true; render();
+  if (r.error) console.warn('Password reset request:', r.error.message);
+}
+function setPasswordView() {
+  const first = !!(session && session.user && session.user.email);
+  return shell(`<div class="card pad stack" style="max-width:420px;margin:24px auto;gap:14px">
+    <div><h1>${first ? 'Welcome -- set your password' : 'Set a new password'}</h1><p class="muted sm" style="margin-top:4px">${first ? "This is your first time signing in. Choose a password you'll use from now on." : 'Choose a new password for your account.'}</p></div>
+    <form id="f-setpw" class="form">
+      <label class="f"><span>New password</span><input name="pw1" type="password" required autocomplete="new-password"></label>
+      <label class="f"><span>Confirm password</span><input name="pw2" type="password" required autocomplete="new-password"></label>
+      ${S.pwError ? `<div class="banner">${esc(S.pwError)}</div>` : ''}
+      <button class="btn primary" type="submit"${S.pwSaving ? ' disabled' : ''}>${S.pwSaving ? 'Saving…' : 'Save password'}</button>
+    </form></div>`);
 }
 
 function setupView() {
@@ -977,6 +1021,11 @@ async function saveItemForm(form) {
 
 /* ---------- check sheet ---------- */
 let CK = null;
+// A plain flag checked before anything else in saveEvForm, so two clicks
+// registered close enough together that the button hasn't visibly disabled
+// itself yet still can't both get through -- disabling the button alone can
+// lose that race under a fast enough double-click.
+let evSaving = false;
 function checkStart(rigId) {
   const r = rigId === 'station' ? { id: 'station', unit: 'Station', isStation: true } : D.rigById[rigId];
   if (!r) return;
@@ -1326,14 +1375,39 @@ async function sendPickedInvites() {
   if (ok) { MS.pop(); drawModal(); }
   if (btn) btn.disabled = false;
 }
+const fmtWhen = iso => new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const fmtClock = iso => new Date(iso).toLocaleString(undefined, { hour: 'numeric', minute: '2-digit' });
+// Bursts of the same action by the same person -- six equipment updates
+// while working through a check, say -- collapse into one line instead of
+// six, since only adjacent, truly-identical action+person runs merge; the
+// log is otherwise unaltered and nothing about it is lost.
+function groupAuditLog(rows) {
+  const groups = [];
+  for (const r of rows) {
+    const last = groups[groups.length - 1];
+    if (last && last.action === r.action && last.actor_name === r.actor_name) last.items.push(r);
+    else groups.push({ action: r.action, actor_name: r.actor_name, items: [r] });
+  }
+  return groups;
+}
+function auditGroupHtml(g) {
+  const n = g.items.length;
+  if (n === 1) { const a = g.items[0]; return `<div class="li"><div class="t"><b>${esc(a.action)}</b><span class="muted sm">${esc(a.what)}</span></div><span class="muted sm" style="text-align:right">${esc(fmtWhen(a.at))}${a.actor_name ? '<br>' + esc(a.actor_name) : ''}</span></div>`; }
+  const whats = g.items.map(x => x.what).filter(Boolean);
+  const whatText = whats.length ? whats.slice(0, 4).join(', ') + (whats.length > 4 ? `, and ${whats.length - 4} more` : '') : '';
+  const times = g.items.map(x => x.at).sort();
+  const range = fmtClock(times[0]) + '–' + fmtClock(times[times.length - 1]);
+  return `<div class="li"><div class="t"><b>${esc(g.action)} ×${n}</b><span class="muted sm">${esc(whatText)}</span></div><span class="muted sm" style="text-align:right">${esc(fmtWhen(times[times.length - 1]).split(',')[0])}, ${esc(range)}${g.actor_name ? '<br>' + esc(g.actor_name) : ''}</span></div>`;
+}
 function recordsView() {
+  const groups = S.audit ? groupAuditLog(S.audit) : null;
   return `<div class="head-row"><h1>Records</h1></div>
     <div class="card pad" style="margin-bottom:14px"><h3>Exports</h3><p class="muted sm" style="margin:4px 0 12px">Spreadsheet files for anyone who asks to see your records, plus a full backup you can keep.</p>
       <div class="row"><button class="btn" data-action="exp-rigs">Rigs</button><button class="btn" data-action="exp-equipment">Equipment</button><button class="btn" data-action="exp-checks">Check history</button><button class="btn" data-action="exp-defs">Deficiencies</button><button class="btn" data-action="exp-members">Members</button><button class="btn primary" data-action="exp-backup">Full backup</button></div></div>
     <div class="card pad" style="margin-bottom:14px"><h3>Invite members</h3><p class="muted sm" style="margin:4px 0 12px">Choose who gets a sign-in invite. Needs custom SMTP set up first (see the README) -- without it, invites will not reach anyone outside your Supabase organization.</p>
       <button class="btn primary" data-action="invite-members">Invite members…</button></div>
-    <div class="sec"><h3>Change log</h3><span class="muted sm">Who changed what, newest first.</span></div>
-    <div class="card list">${S.auditError ? `<div class="empty">Could not load the change log: ${esc(S.auditError)}</div>` : S.audit === null || S.auditLoading ? '<div class="empty">Loading…</div>' : S.audit.length ? S.audit.map(a => `<div class="li"><div class="t"><b>${esc(a.action)}</b><span class="muted sm">${esc(a.what)}</span></div><span class="muted sm" style="text-align:right">${esc(new Date(a.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}${a.actor_name ? '<br>' + esc(a.actor_name) : ''}</span></div>`).join('') : '<div class="empty">No changes logged yet.</div>'}</div>`;
+    <div class="sec"><h3>Change log</h3><span class="muted sm">Who changed what, newest first. A run of the same change by the same person is shown as one line.</span></div>
+    <div class="card list">${S.auditError ? `<div class="empty">Could not load the change log: ${esc(S.auditError)}</div>` : groups === null || S.auditLoading ? '<div class="empty">Loading…</div>' : groups.length ? groups.map(auditGroupHtml).join('') : '<div class="empty">No changes logged yet.</div>'}</div>`;
 }
 
 /* ---------- events and manpower signup ---------- */
@@ -1470,29 +1544,35 @@ function slotRowHtml(s) {
     <button type="button" class="btn sm danger" data-action="ev-slot-del">Remove this row</button></div>`;
 }
 function evFormHtml(e) {
-  const x = e || { date: today(), slots: [{ id: '', label: 'Any member', need: 6, cats: [], req: '' }] };
+  const x = e || { date: today(), slots: [] };
+  const offerRepeat = !e || !x.series; // a one-off event, whether new or existing, can still be turned into a series
   return `<div class="sheet-h"><div><h2>${e ? 'Edit event' : 'Add an event'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
     <div class="sheet-b"><form id="f-ev" class="form" data-id="${esc(x.id || '')}">
       <label class="f"><span>Title</span><input name="title" value="${esc(x.title || '')}" required placeholder="Monthly meeting, hose testing, parade detail"></label>
       <div class="two"><label class="f"><span>Type</span><input name="category" list="dl-evcat" value="${esc(x.category || '')}"></label><label class="f"><span>Date</span><input name="date" type="date" value="${esc(x.date || today())}" required></label></div>
-      <div class="two"><label class="f"><span>Starts</span><input name="start_time" type="time" value="${esc(x.start_time || '')}"></label><label class="f"><span>Ends</span><input name="end_time" type="time" value="${esc(x.end_time || '')}"></label></div>
-      <label class="f"><span>Where</span><input name="location" value="${esc(x.location || '')}" placeholder="Station 24"></label>
+      <div class="two"><label class="f"><span>Starts</span><input name="start_time" type="time" step="900" value="${esc(x.start_time || '')}"></label><label class="f"><span>Ends</span><input name="end_time" type="time" step="900" value="${esc(x.end_time || '')}"></label></div>
+      <label class="f"><span>Where</span><input name="location" value="${esc(x.location !== undefined ? x.location : 'Station 24')}"></label>
       <label class="f"><span>Details</span><textarea name="description" placeholder="What to bring, who to contact">${esc(x.description || '')}</textarea></label>
       <label class="f"><span>If this is a training, it satisfies</span><select name="req"><option value="">Nothing in particular</option>${S.reqs.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0)).map(r => `<option value="${esc(r.id)}"${x.satisfies_requirement_id === r.id ? ' selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
       <div class="muted sm" style="margin-top:-6px">Taking attendance at this event will then complete it for whoever actually showed up -- separately from who signed up ahead of time.</div>
-      <div class="sec" style="margin:4px 0"><h3>Manpower</h3><span class="muted sm">Add a row for each kind of help you need. Members sign up for one row.</span></div>
+      <div class="sec" style="margin:4px 0"><h3>Manpower</h3><span class="muted sm">Most events don't need this. Add a row only if you need people to sign up ahead of time.</span></div>
       <div id="slots" class="stack">${(x.slots || []).map(slotRowHtml).join('')}</div>
       <div><button type="button" class="btn sm" data-action="ev-slot-add">Add a row</button></div>
-      ${e ? (x.series ? `<label class="chk"><input type="checkbox" name="applyall">Apply these changes to this and all later events in the series</label><div class="muted sm" style="margin-top:-6px">Each keeps its own date and its own signups.</div>` : '') : `<div class="two"><label class="f"><span>Repeat</span><select name="repeat" id="ev-repeat"><option value="">Does not repeat</option></select></label><label class="f" data-rep-wrap hidden><span>How many in all</span><input name="repeat_n" type="number" min="2" max="36" value="6"></label></div>
-      <div class="muted sm" id="ev-repprev" style="margin-top:-6px"></div>
-      <label class="chk"><input type="checkbox" name="announce" checked>Also post a message on everyone's home page</label>`}
+      ${e && x.series ? `<label class="chk"><input type="checkbox" name="applyall">Apply these changes to this and all later events in the series</label><div class="muted sm" style="margin-top:-6px">Each keeps its own date and its own signups.</div>` : ''}
+      ${offerRepeat ? `<div class="two"><label class="f"><span>Repeat</span><select name="repeat" id="ev-repeat"><option value="">Does not repeat</option></select></label><label class="f" data-rep-wrap hidden><span>How many in all</span><input name="repeat_n" type="number" min="2" max="36" value="6"></label></div>
+      <div class="muted sm" id="ev-repprev" style="margin-top:-6px"></div>` : ''}
+      ${!e ? `<label class="chk"><input type="checkbox" name="announce" checked>Also post a message on everyone's home page</label>` : ''}
       <datalist id="dl-evcat">${EV_CATS.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
     </form></div>
     <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${e ? `<button class="btn danger" data-action="ev-cancel" data-id="${esc(x.id)}">${x.cancelled ? 'Reopen' : 'Cancel event'}</button><button class="btn danger" data-action="ev-del" data-id="${esc(x.id)}">Delete</button>${x.series ? `<button class="btn danger" data-action="ev-del-series" data-series="${esc(x.series)}">Delete this and every event in the series</button>` : ''}` : ''}${saveBtn('f-ev')}</div>`;
 }
 const EV_CATS = ['Training', 'Meeting', 'Drill', 'Detail or standby', 'Fundraiser', 'Community event', 'Other'];
+const addHourToTime = t => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return pad((h + 1) % 24) + ':' + pad(m); };
 function evFormMount(root) {
   const f = root.querySelector('#f-ev'); if (!f) return;
+  if (f.elements.start_time && f.elements.end_time) {
+    f.elements.start_time.addEventListener('change', () => { if (!f.elements.end_time.value) f.elements.end_time.value = addHourToTime(f.elements.start_time.value); });
+  }
   const sel = f.elements.repeat; if (sel) {
     const dI = f.elements.date, nI = f.elements.repeat_n, w = root.querySelector('[data-rep-wrap]'), pv = root.querySelector('#ev-repprev');
     const upd = () => { w.hidden = !sel.value; if (!sel.value || !dI.value) { pv.textContent = ''; return; } const n = Math.min(36, Math.max(2, Number(nI.value) || 6)); const ds = repeatDates(dI.value, sel.value, n); pv.textContent = ds.length + ' events: ' + ds.slice(0, 6).map(fmt2).join('; ') + (ds.length > 6 ? '; and ' + (ds.length - 6) + ' more' : '') + (ds.length < n ? '. Some months have no such day, so fewer than ' + n + ' were found.' : ''); };
@@ -1501,14 +1581,27 @@ function evFormMount(root) {
   }
 }
 async function saveEvForm(form) {
+  if (evSaving) return;
   const fd = new FormData(form), id = form.dataset.id || null;
   if (!fd.get('title').trim() || !fd.get('date')) { toast('Add a title and a date.', 'bad'); return; }
+  evSaving = true;
   const slots = [...form.querySelectorAll('.slot-row')].map(r => ({ id: r.querySelector('[name=slot_id]').value || ('s' + Math.random().toString(36).slice(2)), label: (r.querySelector('[name=slot_label]').value || '').trim() || 'Any member', need: Math.max(1, Number(r.querySelector('[name=slot_need]').value) || 1), cats: [...r.querySelectorAll('[name=slot_cat]:checked')].map(c => c.value), req: r.querySelector('[name=slot_req]').value || '' }));
   const data = { title: fd.get('title').trim(), category: (fd.get('category') || '').trim(), date: fd.get('date'), start_time: fd.get('start_time') || '', end_time: fd.get('end_time') || '', location: (fd.get('location') || '').trim(), description: (fd.get('description') || '').trim(), satisfies_requirement_id: fd.get('req') || null, slots };
   const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
   try {
     if (id) {
       const cur = S.events.find(x => x.id === id);
+      const rep = fd.get('repeat'); // only present when editing a one-off event that doesn't have a series yet
+      if (rep && cur && !cur.series) {
+        // Turning an existing single event into the start of a new series.
+        const n = Math.min(36, Math.max(2, Number(fd.get('repeat_n')) || 6));
+        const dates = repeatDates(data.date, rep, n);
+        const series = 'ser' + Math.random().toString(36).slice(2);
+        const r = await sb.from('events').update({ ...data, series }).eq('id', id); if (r.error) throw r.error;
+        for (const d of dates.slice(1)) { const ir = await sb.from('events').insert({ ...data, date: d, series, cancelled: false, removed: false, by_member: cur.by_member || (S.me ? S.me.id : null) }); if (ir.error) throw ir.error; }
+        MS.pop(); drawModal(); toast(`Saved, and added ${dates.length - 1} more event(s) in the new series`, 'ok'); loadAll();
+        evSaving = false; return;
+      }
       const r = await sb.from('events').update(data).eq('id', id); if (r.error) throw r.error;
       let more = 0;
       if (fd.get('applyall') && cur && cur.series) {
@@ -1516,7 +1609,7 @@ async function saveEvForm(form) {
         for (const o of S.events.filter(x => x.series === cur.series && !x.removed && x.id !== id && x.date >= cur.date)) { const ur = await sb.from('events').update(rest).eq('id', o.id); if (!ur.error) more++; }
       }
       MS.pop(); drawModal(); toast(more ? `Saved, and updated ${more} later event(s)` : 'Event saved', 'ok'); loadAll();
-      return;
+      evSaving = false; return;
     }
     const rep = fd.get('repeat');
     const n = rep ? Math.min(36, Math.max(2, Number(fd.get('repeat_n')) || 6)) : 1;
@@ -1528,7 +1621,8 @@ async function saveEvForm(form) {
       if (mr.error) console.warn('Could not post the event announcement:', mr.error.message);
     }
     MS.pop(); drawModal(); toast(dates.length > 1 ? dates.length + ' events added' : 'Event added', 'ok'); loadAll();
-  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+    evSaving = false;
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; evSaving = false; }
 }
 async function setSignup(eventId, memberId, slotId) {
   if (slotId) { const r = await sb.from('event_signups').upsert({ event_id: eventId, member_id: memberId, slot_id: slotId }, { onConflict: 'event_id,member_id' }); return r; }
@@ -1743,7 +1837,7 @@ async function markBoardRead(board) {
 /* ---------- rendering ---------- */
 function renderTabs() {
   const el = $('#tabs'), who = $('#who');
-  if (!session || !S.me) { el.innerHTML = ''; who.innerHTML = session ? `<button class="btn sm" data-action="signout">Sign out</button>` : ''; return; }
+  if (!session || !S.me || S.needsPassword) { el.innerHTML = ''; who.innerHTML = session ? `<button class="btn sm" data-action="signout">Sign out</button>` : ''; return; }
   const T = (k, l) => `<button data-action="tab" data-tab="${k}"${S.tab === k ? ' aria-current="page"' : ''}>${l}</button>`;
   const showMem = S.perms.view_roster || S.perms.manage_members;
   const showApp = S.perms.view_apparatus;
@@ -1755,6 +1849,7 @@ function render() {
   if (S.fatal) { v.innerHTML = shell(`<div class="banner">${esc(S.fatal)}</div>`); renderTabs(); return; }
   if (!cfgOk()) { v.innerHTML = setupView(); renderTabs(); return; }
   if (!session) { v.innerHTML = signInView(S.signInError); renderTabs(); return; }
+  if (S.needsPassword) { v.innerHTML = setPasswordView(); renderTabs(); return; }
   if (S.loading) { v.innerHTML = shell('<p class="muted">Loading…</p>'); renderTabs(); return; }
   if (S.error) { v.innerHTML = shell(`<div class="banner">Something went wrong loading your data: ${esc(S.error)} <button class="btn sm" data-action="reload">Try again</button></div>`); renderTabs(); return; }
   if (!S.me) { v.innerHTML = unlinkedView(); renderTabs(); return; }
@@ -1844,6 +1939,7 @@ document.addEventListener('click', async e => {
   if (a === 'tab') { S.tab = el.dataset.tab; if (S.tab === 'rigs') S.rigId = null; if (S.tab === 'board') { S.brdBoard = null; S.brdThread = null; } if (S.tab === 'records' && S.audit === null && !S.auditLoading) loadAudit(); render(); window.scrollTo(0, 0); }
   else if (a === 'signout') { await sb.auth.signOut(); }
   else if (a === 'reload') { loadAll(); }
+  else if (a === 'forgot-pw') { const emailField = document.querySelector('#f-signin [name=email]'); requestPasswordReset(emailField ? emailField.value.trim() : ''); }
   else if (a === 'mem-open') { const id = el.dataset.id; MS.push(() => memSheet(id)); drawModal(); }
   else if (a === 'mem-new') { openMemberForm(null); }
   else if (a === 'mem-edit') { if (MS.length) MS.pop(); openMemberForm(el.dataset.id); }
@@ -1914,6 +2010,7 @@ document.addEventListener('submit', async e => {
   if (e.target.id === 'f-def') { e.preventDefault(); saveDefForm(e.target); return; }
   if (e.target.id === 'f-oos') { e.preventDefault(); saveOOS(e.target); return; }
   if (e.target.id === 'f-ret') { e.preventDefault(); saveRetire(e.target); return; }
+  if (e.target.id === 'f-setpw') { e.preventDefault(); saveNewPassword(e.target); return; }
   if (e.target.id !== 'f-signin') return;
   e.preventDefault();
   const fd = new FormData(e.target), btn = e.target.querySelector('button[type=submit]');
