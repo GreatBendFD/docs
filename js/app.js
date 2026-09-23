@@ -169,7 +169,7 @@ const S = {
   rigs: [], equipment: [], items: [], sessions: [], results: [], defs: [],
   rigId: null, rsub: 'checks', eq: { q: '', where: 'all', cat: 'all', ret: false }, showArch: {}, showBase: {}, defShow: 'open',
   audit: null, auditLoading: false, auditError: '', pushState: 'unsupported', pushError: '',
-  events: [], signups: [], trainings: [], attendanceRows: [], ev: { month: '', day: '', past: false }
+  events: [], signups: [], trainings: [], attendanceRows: [], eventAttendanceRows: [], ev: { month: '', day: '', past: false }
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
@@ -178,7 +178,7 @@ function resetState() {
   S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.mtab = 'roster'; S.q = ''; S.od = { none: true, soon: true }; S.error = '';
   S.rigs = []; S.equipment = []; S.items = []; S.sessions = []; S.results = []; S.defs = []; S.rigId = null; S.rsub = 'checks'; S.eq = { q: '', where: 'all', cat: 'all', ret: false }; S.showArch = {}; S.showBase = {}; S.defShow = 'open';
   S.audit = null; S.auditLoading = false; S.auditError = ''; S.loading = false;
-  S.events = []; S.signups = []; S.trainings = []; S.attendanceRows = []; S.ev = { month: '', day: '', past: false };
+  S.events = []; S.signups = []; S.trainings = []; S.attendanceRows = []; S.eventAttendanceRows = []; S.ev = { month: '', day: '', past: false };
   D = { latest: {}, memById: {} }; MS.length = 0;
 }
 
@@ -193,6 +193,8 @@ function derive() {
   for (const s of S.signups) (D.signByEvent[s.event_id] = D.signByEvent[s.event_id] || {})[s.member_id] = s;
   D.attendance = {};
   for (const a of S.attendanceRows) (D.attendance[a.training_id] = D.attendance[a.training_id] || []).push(a.member_id);
+  D.evAttendance = {};
+  for (const a of S.eventAttendanceRows) (D.evAttendance[a.event_id] = D.evAttendance[a.event_id] || []).push(a.member_id);
   D.rigById = Object.fromEntries(S.rigs.map(r => [r.id, r]));
   D.eqById = Object.fromEntries(S.equipment.map(e => [e.id, e]));
   D.resBySession = {};
@@ -1105,7 +1107,9 @@ const RIGACTIONS = {
   'tr-new': () => { MS.push(() => trFormHtml(null)); drawModal(); },
   'tr-edit': el => { const t = S.trainings.find(x => x.id === el.dataset.id); if (t) { if (MS.length) MS.pop(); MS.push(() => trFormHtml(t)); drawModal(); } },
   'tr-open': el => { MS.push(() => trDetailSheet(el.dataset.id)); drawModal(); },
-  'tr-save-att': el => { saveAttendance(el.dataset.id); }
+  'tr-save-att': el => { saveAttendance(el.dataset.id); },
+  'ev-att': el => { if (MS.length) MS.pop(); MS.push(() => evAttendanceSheet(el.dataset.id)); drawModal(); },
+  'ev-save-att': el => { saveEventAttendance(el.dataset.id); }
 };
 
 /* ---------- records: exports and the change log ---------- */
@@ -1333,12 +1337,41 @@ function evDetailSheet(id) {
       <div class="who">${rows.length ? rows.map(x => { const mm = D.memById[x.member_id]; return `<span class="chip${x.member_id === (m && m.id) ? ' ok' : ''}">${esc(mm ? mm.name : '?')}${mgr && !past ? `<button aria-label="Remove ${esc(mm ? mm.name : '')}" data-action="ev-remove" data-event="${esc(id)}" data-member="${esc(x.member_id)}">×</button>` : ''}</span>`; }).join('') : '<span class="muted sm">Nobody yet</span>'}</div>
       ${action ? `<div class="row">${action}</div>` : ''}</div>`;
   }).join('');
-  const body = `<div class="rc-chips" style="margin-bottom:10px">${chip(e.category || 'Event')}${e.cancelled ? chip('Cancelled', 'bad') : past ? chip('Past') : ''}${mine && !e.cancelled ? chip('You are signed up', 'ok') : ''}</div>
+  const satRq = e.satisfies_requirement_id ? S.reqs.find(r => r.id === e.satisfies_requirement_id) : null;
+  const attCount = (D.evAttendance[id] || []).length;
+  const body = `<div class="rc-chips" style="margin-bottom:10px">${chip(e.category || 'Event')}${e.cancelled ? chip('Cancelled', 'bad') : past ? chip('Past') : ''}${mine && !e.cancelled ? chip('You are signed up', 'ok') : ''}${satRq ? chip('Satisfies ' + satRq.name) : ''}</div>
     <div class="card pad stack" style="gap:4px"><b>${esc(evWhen(e))}</b>${e.location ? `<span>${esc(e.location)}</span>` : ''}${e.description ? `<span class="muted" style="white-space:pre-wrap;margin-top:6px">${esc(e.description)}</span>` : ''}</div>
     ${!m && !mgr ? '<div class="banner" style="margin-top:10px">Your sign-in is not linked to a member record, so you cannot sign up yet. Ask an administrator to link it.</div>' : ''}
+    ${satRq && S.perms.manage_training ? `<div class="card pad spread" style="margin-top:10px"><span>${attCount ? attCount + ' marked present' : 'Nobody marked present yet'}. Attending completes ${esc(satRq.name)} for them.</span><button class="btn sm" data-action="ev-att" data-id="${esc(id)}">Take attendance</button></div>` : ''}
     <div class="sec"><h3>Who is needed</h3></div><div class="stack">${slots || '<div class="card empty">No signup slots for this event.</div>'}</div>`;
   const foot = `<button class="btn" data-action="m-close">Close</button>${mgr ? `<button class="btn" data-action="copy" data-v="${esc(evText(e))}">Copy list</button>${!past && !e.cancelled ? `<button class="btn" data-action="ev-addwho" data-id="${esc(id)}">Add someone</button>` : ''}<button class="btn primary" data-action="ev-edit" data-id="${esc(id)}">Edit</button>` : ''}`;
   return sheet(esc(e.title), body, foot);
+}
+function evAttendanceSheet(id) {
+  const e = S.events.find(x => x.id === id);
+  if (!e) return sheet('Event', '<div class="empty">This event no longer exists.</div>', '<button class="btn" data-action="m-close">Close</button>');
+  const rq = e.satisfies_requirement_id ? S.reqs.find(r => r.id === e.satisfies_requirement_id) : null;
+  const attended = new Set(D.evAttendance[id] || []);
+  const signedUp = new Set(Object.keys(evPeople(id)));
+  const list = S.members.filter(m => m.status !== 'inactive').sort((a, b) => (signedUp.has(b.id) - signedUp.has(a.id)) || a.name.localeCompare(b.name));
+  const body = `${rq ? `<p class="muted sm">Checking someone here records their ${esc(rq.name)} as done, dated to this event.</p>` : ''}
+    <div class="card list">${list.map(m => `<label class="li" style="cursor:pointer"><div class="t"><b>${esc(m.name)}</b><span class="muted sm">${esc(m.category || 'No category')}${signedUp.has(m.id) ? ', signed up' : ''}</span></div><input type="checkbox" class="ev-att" data-id="${esc(m.id)}"${attended.has(m.id) ? ' checked disabled' : ''} style="width:22px;height:22px;accent-color:var(--navy)"></label>`).join('')}</div>`;
+  return sheet('Attendance', body, `<button class="btn" data-action="m-close">Close</button><button class="btn primary" data-action="ev-save-att" data-id="${esc(id)}">Save attendance</button>`, esc(e.title));
+}
+async function saveEventAttendance(eventId) {
+  const checked = [...document.querySelectorAll('.ev-att:checked:not(:disabled)')].map(el => el.dataset.id);
+  if (!checked.length) { toast('Check at least one new attendee, or close if nobody new attended.', 'bad'); return; }
+  const btn = document.querySelector('[data-action=ev-save-att]'); if (btn) btn.disabled = true;
+  try {
+    const e = S.events.find(x => x.id === eventId);
+    const rows = checked.map(member_id => ({ event_id: eventId, member_id }));
+    const r = await sb.from('event_attendance').insert(rows); if (r.error) throw r.error;
+    if (e && e.satisfies_requirement_id) {
+      const recs = checked.map(member_id => ({ member_id, requirement_id: e.satisfies_requirement_id, done_on: e.date, due_on: null, approx: false, result: 'Pass', notes: 'Event: ' + e.title, recorded_by: S.me ? S.me.id : null }));
+      const rr = await sb.from('member_records').insert(recs); if (rr.error) throw rr.error;
+    }
+    MS.pop(); drawModal(); toast(`Marked ${checked.length} present`, 'ok'); loadAll();
+  } catch (e2) { toast('Could not save: ' + ((e2 && e2.message) || String(e2)), 'bad'); if (btn) btn.disabled = false; }
 }
 function slotRowHtml(s) {
   s = s || {}; const reqs = S.reqs.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0));
@@ -1357,6 +1390,8 @@ function evFormHtml(e) {
       <div class="two"><label class="f"><span>Starts</span><input name="start_time" type="time" value="${esc(x.start_time || '')}"></label><label class="f"><span>Ends</span><input name="end_time" type="time" value="${esc(x.end_time || '')}"></label></div>
       <label class="f"><span>Where</span><input name="location" value="${esc(x.location || '')}" placeholder="Station 24"></label>
       <label class="f"><span>Details</span><textarea name="description" placeholder="What to bring, who to contact">${esc(x.description || '')}</textarea></label>
+      <label class="f"><span>If this is a training, it satisfies</span><select name="req"><option value="">Nothing in particular</option>${S.reqs.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0)).map(r => `<option value="${esc(r.id)}"${x.satisfies_requirement_id === r.id ? ' selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
+      <div class="muted sm" style="margin-top:-6px">Taking attendance at this event will then complete it for whoever actually showed up -- separately from who signed up ahead of time.</div>
       <div class="sec" style="margin:4px 0"><h3>Manpower</h3><span class="muted sm">Add a row for each kind of help you need. Members sign up for one row.</span></div>
       <div id="slots" class="stack">${(x.slots || []).map(slotRowHtml).join('')}</div>
       <div><button type="button" class="btn sm" data-action="ev-slot-add">Add a row</button></div>
@@ -1381,7 +1416,7 @@ async function saveEvForm(form) {
   const fd = new FormData(form), id = form.dataset.id || null;
   if (!fd.get('title').trim() || !fd.get('date')) { toast('Add a title and a date.', 'bad'); return; }
   const slots = [...form.querySelectorAll('.slot-row')].map(r => ({ id: r.querySelector('[name=slot_id]').value || ('s' + Math.random().toString(36).slice(2)), label: (r.querySelector('[name=slot_label]').value || '').trim() || 'Any member', need: Math.max(1, Number(r.querySelector('[name=slot_need]').value) || 1), cats: [...r.querySelectorAll('[name=slot_cat]:checked')].map(c => c.value), req: r.querySelector('[name=slot_req]').value || '' }));
-  const data = { title: fd.get('title').trim(), category: (fd.get('category') || '').trim(), date: fd.get('date'), start_time: fd.get('start_time') || '', end_time: fd.get('end_time') || '', location: (fd.get('location') || '').trim(), description: (fd.get('description') || '').trim(), slots };
+  const data = { title: fd.get('title').trim(), category: (fd.get('category') || '').trim(), date: fd.get('date'), start_time: fd.get('start_time') || '', end_time: fd.get('end_time') || '', location: (fd.get('location') || '').trim(), description: (fd.get('description') || '').trim(), satisfies_requirement_id: fd.get('req') || null, slots };
   const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
   try {
     if (id) {
@@ -1400,7 +1435,10 @@ async function saveEvForm(form) {
     const dates = rep ? repeatDates(data.date, rep, n) : [data.date];
     const series = dates.length > 1 ? 'ser' + Math.random().toString(36).slice(2) : null;
     for (const d of dates) { const r = await sb.from('events').insert({ ...data, date: d, series, cancelled: false, removed: false, by_member: S.me ? S.me.id : null }); if (r.error) throw r.error; }
-    if (fd.get('announce')) await sb.from('messages').insert({ body: `New event: ${data.title}, ${evWhen(data)}${data.location ? ' at ' + data.location : ''}${dates.length > 1 ? ' (repeats, ' + dates.length + ' dates)' : ''}. Sign up under Events.`, tone: 'info', aud_all: true, aud_cats: [], starts_on: today(), ends_on: data.date, by_member: S.me ? S.me.id : null, removed: false }).catch(() => {});
+    if (fd.get('announce')) {
+      const mr = await sb.from('messages').insert({ body: `New event: ${data.title}, ${evWhen(data)}${data.location ? ' at ' + data.location : ''}${dates.length > 1 ? ' (repeats, ' + dates.length + ' dates)' : ''}. Sign up under Events.`, tone: 'info', aud_all: true, aud_cats: [], starts_on: today(), ends_on: data.date, by_member: S.me ? S.me.id : null, removed: false });
+      if (mr.error) console.warn('Could not post the event announcement:', mr.error.message);
+    }
     MS.pop(); drawModal(); toast(dates.length > 1 ? dates.length + ' events added' : 'Event added', 'ok'); loadAll();
   } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
 }
@@ -1566,10 +1604,10 @@ async function loadAll() {
       S.results = cr.data || [];
     } else { S.rigs = []; S.equipment = []; S.items = []; S.defs = []; S.sessions = []; S.results = []; }
     if (S.me) {
-      const [ev, sg] = await Promise.all([sb.from('events').select('*').order('date'), sb.from('event_signups').select('*')]);
-      for (const r of [ev, sg]) if (r.error) throw r.error;
-      S.events = ev.data || []; S.signups = sg.data || [];
-    } else { S.events = []; S.signups = []; }
+      const [ev, sg, ea] = await Promise.all([sb.from('events').select('*').order('date'), sb.from('event_signups').select('*'), sb.from('event_attendance').select('*')]);
+      for (const r of [ev, sg, ea]) if (r.error) throw r.error;
+      S.events = ev.data || []; S.signups = sg.data || []; S.eventAttendanceRows = ea.data || [];
+    } else { S.events = []; S.signups = []; S.eventAttendanceRows = []; }
     if (S.perms.view_roster || S.perms.manage_training) {
       const [tr, at] = await Promise.all([sb.from('trainings').select('*').order('date', { ascending: false }), sb.from('training_attendance').select('*')]);
       for (const r of [tr, at]) if (r.error) throw r.error;
