@@ -338,10 +338,9 @@ function membersView() {
   if (S.perms.view_roster) tabs.push(['overdue', 'Overdue']);
   if (S.perms.view_roster || S.perms.manage_training) tabs.push(['training', 'Training']);
   if (S.perms.manage_members) tabs.push(['reqs', 'Requirements']);
-  if (S.perms.post_messages) tabs.push(['msgs', 'Messages']);
   if (!tabs.some(t => t[0] === S.mtab)) S.mtab = 'roster';
-  const body = S.mtab === 'reqs' ? reqsView() : S.mtab === 'overdue' ? overdueView() : S.mtab === 'training' ? trainingsView() : S.mtab === 'msgs' ? msgsView() : rosterView();
-  return `<div class="head-row"><h1>Members</h1>${S.mtab === 'roster' && S.perms.manage_members ? '<button class="btn primary" data-action="mem-new">Add member</button>' : S.mtab === 'msgs' && S.perms.post_messages ? '<button class="btn primary" data-action="msg-new">Post a message</button>' : ''}</div>
+  const body = S.mtab === 'reqs' ? reqsView() : S.mtab === 'overdue' ? overdueView() : S.mtab === 'training' ? trainingsView() : rosterView();
+  return `<div class="head-row"><h1>Members</h1>${S.mtab === 'roster' && S.perms.manage_members ? '<button class="btn primary" data-action="mem-new">Add member</button>' : ''}</div>
     ${tabs.length > 1 ? `<div class="subtabs">${tabs.map(([k, l]) => `<button data-action="mtab" data-tab="${k}"${S.mtab === k ? ' aria-current="page"' : ''}>${l}</button>`).join('')}</div>` : ''}
     ${body}`;
 }
@@ -610,7 +609,8 @@ async function removeMsg(id) {
 }
 function msgsView() {
   const list = S.messages.filter(m => !m.removed).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')), t = today();
-  return `<div class="head-row"><div><h3>Messages</h3><span class="muted sm">Shown as a ribbon at the top of the home page.</span></div></div>
+  return `<div class="head-row"><h1>Messages</h1><button class="btn primary" data-action="msg-new">Post a message</button></div>
+    <p class="muted sm" style="margin-top:-8px">Shown as a ribbon at the top of the home page.</p>
     <div class="stack">${list.length ? list.map(m => {
       const st = m.starts_on && m.starts_on > t ? 'Scheduled' : (m.ends_on && m.ends_on < t) ? 'Ended' : 'Showing';
       return `<div class="card pad stack" style="gap:8px"><div style="white-space:pre-wrap;overflow-wrap:anywhere;font-weight:600">${esc(m.body)}</div>
@@ -1723,7 +1723,7 @@ function renderTabs() {
   const T = (k, l) => `<button data-action="tab" data-tab="${k}"${S.tab === k ? ' aria-current="page"' : ''}>${l}</button>`;
   const showMem = S.perms.view_roster || S.perms.manage_members;
   const showApp = S.perms.view_apparatus;
-  el.innerHTML = T('home', 'Home') + (S.me ? T('events', 'Events') + T('board', 'Board') : '') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '') + (S.perms.admin_setup ? T('records', 'Records') : '');
+  el.innerHTML = T('home', 'Home') + (S.me ? T('events', 'Events') + T('board', 'Board') : '') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '') + (S.perms.post_messages ? T('msgs', 'Messages') : '') + (S.perms.admin_setup ? T('records', 'Records') : '');
   who.innerHTML = `<button class="btn sm" data-action="signout">Sign out</button>`;
 }
 function render() {
@@ -1739,7 +1739,8 @@ function render() {
   if (tab === 'records' && !S.perms.admin_setup) tab = 'home';
   if (tab === 'events' && !S.me) tab = 'home';
   if (tab === 'board' && !S.me) tab = 'home';
-  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : tab === 'records' ? recordsView() : tab === 'events' ? eventsView() : tab === 'board' ? messageBoardRoute() : homeView());
+  if (tab === 'msgs' && !S.perms.post_messages) tab = 'home';
+  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : tab === 'records' ? recordsView() : tab === 'events' ? eventsView() : tab === 'board' ? messageBoardRoute() : tab === 'msgs' ? msgsView() : homeView());
   renderTabs();
   drawModal();
 }
