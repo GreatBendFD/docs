@@ -18,6 +18,15 @@ window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferr
 window.addEventListener('appinstalled', () => { deferredInstallPrompt = null; render(); });
 async function registerSW() { if (!pushSupported()) return null; try { return await navigator.serviceWorker.register('sw.js'); } catch (e) { return null; } }
 async function currentPushSub() { if (!pushSupported()) return null; try { const reg = await navigator.serviceWorker.ready; return await reg.pushManager.getSubscription(); } catch (e) { return null; } }
+// Saves a subscription without relying on an upsert's ON CONFLICT DO UPDATE
+// path -- that path needs its own database rule, separate from the insert
+// and delete rules, which is easy to leave out and hard to notice until
+// someone's phone already has a subscription and tries to re-save it. This
+// only ever uses insert and delete, so it only ever needs those two rules.
+async function savePushSub(j) {
+  await sb.from('push_subscriptions').delete().eq('endpoint', j.endpoint);
+  return await sb.from('push_subscriptions').insert({ member_id: S.me.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth });
+}
 async function refreshPushState() {
   if (!pushSupported()) { S.pushState = 'unsupported'; return; }
   if (Notification.permission === 'denied') { S.pushState = 'denied'; return; }
@@ -28,7 +37,7 @@ async function refreshPushState() {
   // knows to use it. Confirm that separately, and re-save it if it's missing.
   const j = sub.toJSON();
   try {
-    const r = await sb.from('push_subscriptions').upsert({ member_id: S.me.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: 'endpoint' });
+    const r = await savePushSub(j);
     S.pushState = r.error ? 'error' : 'on';
     if (r.error) S.pushError = r.error.message;
   } catch (e) { S.pushState = 'error'; S.pushError = (e && e.message) || String(e); }
@@ -50,7 +59,7 @@ async function enablePush() {
   // run yet) without the phone-level part failing at all.
   const j = sub.toJSON();
   try {
-    const r = await sb.from('push_subscriptions').upsert({ member_id: S.me.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: 'endpoint' });
+    const r = await savePushSub(j);
     if (r.error) throw r.error;
     S.pushState = 'on'; S.pushError = ''; toast('Notifications are on', 'ok');
   } catch (e) {
