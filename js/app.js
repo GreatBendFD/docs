@@ -169,7 +169,8 @@ const S = {
   rigs: [], equipment: [], items: [], sessions: [], results: [], defs: [],
   rigId: null, rsub: 'checks', eq: { q: '', where: 'all', cat: 'all', ret: false }, showArch: {}, showBase: {}, defShow: 'open',
   audit: null, auditLoading: false, auditError: '', pushState: 'unsupported', pushError: '',
-  events: [], signups: [], trainings: [], attendanceRows: [], eventAttendanceRows: [], ev: { month: '', day: '', past: false }
+  events: [], signups: [], trainings: [], attendanceRows: [], eventAttendanceRows: [], ev: { month: '', day: '', past: false },
+  threads: [], replies: [], boardReads: [], brdBoard: null, brdThread: null
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
@@ -179,6 +180,7 @@ function resetState() {
   S.rigs = []; S.equipment = []; S.items = []; S.sessions = []; S.results = []; S.defs = []; S.rigId = null; S.rsub = 'checks'; S.eq = { q: '', where: 'all', cat: 'all', ret: false }; S.showArch = {}; S.showBase = {}; S.defShow = 'open';
   S.audit = null; S.auditLoading = false; S.auditError = ''; S.loading = false;
   S.events = []; S.signups = []; S.trainings = []; S.attendanceRows = []; S.eventAttendanceRows = []; S.ev = { month: '', day: '', past: false };
+  S.threads = []; S.replies = []; S.boardReads = []; S.brdBoard = null; S.brdThread = null;
   D = { latest: {}, memById: {} }; MS.length = 0;
 }
 
@@ -195,6 +197,10 @@ function derive() {
   for (const a of S.attendanceRows) (D.attendance[a.training_id] = D.attendance[a.training_id] || []).push(a.member_id);
   D.evAttendance = {};
   for (const a of S.eventAttendanceRows) (D.evAttendance[a.event_id] = D.evAttendance[a.event_id] || []).push(a.member_id);
+  D.repliesByThread = {};
+  for (const r of S.replies) (D.repliesByThread[r.thread_id] = D.repliesByThread[r.thread_id] || []).push(r);
+  D.boardRead = D.boardRead || {};
+  for (const r of S.boardReads) if (!D.boardRead[r.board] || r.last_read_at > D.boardRead[r.board]) D.boardRead[r.board] = r.last_read_at;
   D.rigById = Object.fromEntries(S.rigs.map(r => [r.id, r]));
   D.eqById = Object.fromEntries(S.equipment.map(e => [e.id, e]));
   D.resBySession = {};
@@ -1156,7 +1162,18 @@ const RIGACTIONS = {
   'tr-open': el => { MS.push(() => trDetailSheet(el.dataset.id)); drawModal(); },
   'tr-save-att': el => { saveAttendance(el.dataset.id); },
   'ev-att': el => { if (MS.length) MS.pop(); MS.push(() => evAttendanceSheet(el.dataset.id)); drawModal(); },
-  'ev-save-att': el => { saveEventAttendance(el.dataset.id); }
+  'ev-save-att': el => { saveEventAttendance(el.dataset.id); },
+  'brd-open': el => { S.brdBoard = el.dataset.board; S.brdThread = null; render(); window.scrollTo(0, 0); markBoardRead(el.dataset.board); },
+  'brd-back': () => { S.brdBoard = null; S.brdThread = null; render(); window.scrollTo(0, 0); },
+  'thr-back': el => { S.brdThread = null; S.brdBoard = el.dataset.board; render(); window.scrollTo(0, 0); },
+  'thr-open': el => { S.brdThread = el.dataset.id; render(); window.scrollTo(0, 0); },
+  'thr-new': el => { MS.push(() => threadFormHtml(el.dataset.board, null)); drawModal(); },
+  'thr-edit': el => { const t = S.threads.find(x => x.id === el.dataset.id); if (t) { MS.push(() => threadFormHtml(t.board, t)); drawModal(); } },
+  'thr-pin': async el => { const t = S.threads.find(x => x.id === el.dataset.id); if (!t) return; const r = await sb.from('board_threads').update({ pinned: !t.pinned }).eq('id', t.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast(t.pinned ? 'Unpinned' : 'Pinned', 'ok'); loadAll(); },
+  'thr-lock': async el => { const t = S.threads.find(x => x.id === el.dataset.id); if (!t) return; const r = await sb.from('board_threads').update({ locked: !t.locked }).eq('id', t.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast(t.locked ? 'Unlocked' : 'Locked', 'ok'); loadAll(); },
+  'thr-del': async el => { const t = S.threads.find(x => x.id === el.dataset.id); if (!t) return; if (!window.confirm('Delete this thread and all its replies? This cannot be undone.')) return; const r = await sb.from('board_threads').update({ removed: true }).eq('id', t.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } S.brdThread = null; toast('Thread deleted', 'ok'); loadAll(); },
+  'rep-edit': el => { const r = (D.repliesByThread[S.brdThread] || []).find(x => x.id === el.dataset.id); if (r) { MS.push(() => replyFormHtml(r)); drawModal(); } },
+  'rep-del': async el => { if (!window.confirm('Delete this reply?')) return; const r = await sb.from('board_replies').update({ removed: true }).eq('id', el.dataset.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast('Reply deleted', 'ok'); loadAll(); }
 };
 
 /* ---------- records: exports and the change log ---------- */
@@ -1573,6 +1590,132 @@ async function saveAttendance(trainingId) {
   } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
 }
 
+/* ---------- message board ---------- */
+const BOARDS = ['General', 'Training', 'Equipment', 'Events & Fundraisers', 'Fire Police'];
+const whoName = id => { const m = D.memById[id]; return m ? m.name : 'A former member'; };
+const canMod = () => S.perms.post_messages;
+function timeAgo(iso) {
+  if (!iso) return '';
+  const then = new Date(iso).getTime(), mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return 'just now'; if (mins < 60) return mins + 'm ago';
+  const hrs = Math.round(mins / 60); if (hrs < 24) return hrs + 'h ago';
+  const days = Math.round(hrs / 24); if (days < 7) return days + 'd ago';
+  return fmt(iso.slice(0, 10));
+}
+function boardCounts() {
+  const out = {};
+  for (const b of BOARDS) out[b] = { threads: 0, latest: null };
+  for (const t of S.threads) {
+    if (t.removed || !out[t.board]) continue;
+    out[t.board].threads++;
+    const stamp = t.updated_at || t.created_at;
+    if (!out[t.board].latest || stamp > out[t.board].latest) out[t.board].latest = stamp;
+  }
+  return out;
+}
+function boardHasUnread(board) {
+  const last = D.boardRead[board];
+  const counts = boardCounts()[board];
+  if (!counts || !counts.latest) return false;
+  return !last || counts.latest > last;
+}
+function boardListView() {
+  const counts = boardCounts();
+  return `<div class="head-row"><h1>Message board</h1></div>
+    <div class="eqlist">${BOARDS.map(b => { const c = counts[b]; const unread = boardHasUnread(b);
+      return `<button class="card eqcard" data-action="brd-open" data-board="${esc(b)}"><span class="top2"><b>${esc(b)}</b>${unread ? chip('New', 'warn') : ''}</span><span class="muted sm">${c.threads} ${plural(c.threads, 'thread')}</span><span class="sm">${c.latest ? 'Last activity ' + timeAgo(c.latest) : 'Nothing posted yet'}</span></button>`; }).join('')}</div>`;
+}
+function threadListHtml(board) {
+  const list = S.threads.filter(t => t.board === board && !t.removed).sort((a, b) => (b.pinned - a.pinned) || (b.updated_at || '').localeCompare(a.updated_at || ''));
+  const lastRead = D.boardRead[board];
+  return list.length ? `<div class="card list">${list.map(t => {
+    const nRep = (D.repliesByThread[t.id] || []).filter(r => !r.removed).length;
+    const isNew = !lastRead || (t.updated_at || t.created_at) > lastRead;
+    return `<div class="li"><div class="t"><button class="btn ghost" style="padding:0;min-height:0;justify-content:flex-start;font-weight:600;color:var(--ink);text-align:left" data-action="thr-open" data-id="${esc(t.id)}">${t.pinned ? '📌 ' : ''}${esc(t.title)}</button><span class="muted sm">${esc(whoName(t.by_member))}, ${timeAgo(t.created_at)}${t.locked ? ', locked' : ''}</span></div><div class="acts">${isNew ? chip('New', 'warn') : ''}${chip(nRep + ' ' + plural(nRep, 'reply', 'replies'))}</div></div>`;
+  }).join('')}</div>` : '<div class="card empty">Nothing posted here yet.</div>';
+}
+function boardThreadsView(board) {
+  if (!BOARDS.includes(board)) return `<div class="card empty">That board does not exist.</div>`;
+  return `<button class="back" data-action="brd-back">← All boards</button>
+    <div class="head-row"><h1>${esc(board)}</h1>${S.me ? `<button class="btn primary" data-action="thr-new" data-board="${esc(board)}">New thread</button>` : ''}</div>
+    <div id="thr-list">${threadListHtml(board)}</div>`;
+}
+function messageBoardRoute() {
+  if (S.brdThread) return threadDetailView(S.brdThread);
+  if (S.brdBoard) return boardThreadsView(S.brdBoard);
+  return boardListView();
+}
+function replyHtml(r) {
+  const mine = S.me && r.by_member === S.me.id;
+  return `<div class="card pad stack" style="gap:6px">${r.removed ? '<span class="muted sm">Removed by a moderator.</span>' : `
+    <div class="spread"><b>${esc(whoName(r.by_member))}</b><span class="muted sm">${timeAgo(r.created_at)}</span></div>
+    <div style="white-space:pre-wrap">${esc(r.body)}</div>
+    <div class="row">${mine ? `<button class="btn sm" data-action="rep-edit" data-id="${esc(r.id)}">Edit</button>` : ''}${mine || canMod() ? `<button class="btn sm danger" data-action="rep-del" data-id="${esc(r.id)}">Delete</button>` : ''}</div>`}</div>`;
+}
+function threadDetailView(id) {
+  const t = S.threads.find(x => x.id === id);
+  if (!t || t.removed) return `<div class="card empty">This thread no longer exists.</div><button class="btn" data-action="brd-back">← All boards</button>`;
+  const mine = S.me && t.by_member === S.me.id;
+  const replies = (D.repliesByThread[id] || []).slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
+  return `<button class="back" data-action="thr-back" data-board="${esc(t.board)}">← ${esc(t.board)}</button>
+    <div class="rc-chips" style="margin-bottom:10px">${chip(t.board)}${t.pinned ? chip('Pinned', 'ok') : ''}${t.locked ? chip('Locked') : ''}</div>
+    <h1 style="margin-bottom:4px">${esc(t.title)}</h1>
+    <div class="muted sm" style="margin-bottom:12px">${esc(whoName(t.by_member))}, ${timeAgo(t.created_at)}</div>
+    <div class="card pad" style="margin-bottom:14px;white-space:pre-wrap">${esc(t.body)}</div>
+    <div class="row" style="margin-bottom:16px">${mine && !t.locked ? `<button class="btn sm" data-action="thr-edit" data-id="${esc(t.id)}">Edit</button>` : ''}${canMod() ? `<button class="btn sm" data-action="thr-pin" data-id="${esc(t.id)}">${t.pinned ? 'Unpin' : 'Pin'}</button><button class="btn sm" data-action="thr-lock" data-id="${esc(t.id)}">${t.locked ? 'Unlock' : 'Lock'}</button>` : ''}${mine || canMod() ? `<button class="btn sm danger" data-action="thr-del" data-id="${esc(t.id)}">Delete</button>` : ''}</div>
+    <div class="sec"><h3>${replies.length} ${plural(replies.length, 'reply', 'replies')}</h3></div>
+    <div class="stack" style="margin-bottom:16px">${replies.map(replyHtml).join('') || '<div class="card empty">No replies yet.</div>'}</div>
+    ${S.me && !t.locked ? `<form id="f-reply" class="form" data-thread="${esc(id)}"><label class="f"><span>Reply</span><textarea name="body" required placeholder="Write a reply…"></textarea></label><button class="btn primary" type="submit">Post reply</button></form>` : t.locked ? '<p class="muted sm">This thread is locked. No new replies.</p>' : ''}`;
+}
+function threadFormHtml(board, t) {
+  return `<div class="sheet-h"><div><h2>${t ? 'Edit thread' : 'New thread'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-thr" class="form" data-id="${esc((t && t.id) || '')}" data-board="${esc((t && t.board) || board)}">
+      <label class="f"><span>Title</span><input name="title" value="${esc((t && t.title) || '')}" required></label>
+      <label class="f"><span>Message</span><textarea name="body" required>${esc((t && t.body) || '')}</textarea></label>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-thr', t ? 'Save' : 'Post')}</div>`;
+}
+function replyFormHtml(r) {
+  return `<div class="sheet-h"><div><h2>Edit reply</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-repedit" class="form" data-id="${esc(r.id)}"><label class="f"><span>Reply</span><textarea name="body" required>${esc(r.body)}</textarea></label></form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-repedit', 'Save')}</div>`;
+}
+async function saveThreadForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null, board = form.dataset.board;
+  const title = fd.get('title').trim(), body = fd.get('body').trim();
+  if (!title || !body) { toast('Add a title and a message.', 'bad'); return; }
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    if (id) { const r = await sb.from('board_threads').update({ title, body, updated_at: new Date().toISOString() }).eq('id', id); if (r.error) throw r.error; }
+    else { const r = await sb.from('board_threads').insert({ board, title, body, by_member: S.me.id }); if (r.error) throw r.error; }
+    MS.pop(); drawModal(); toast(id ? 'Thread saved' : 'Thread posted', 'ok');
+    S.brdBoard = board; S.brdThread = null;
+    await loadAll(); markBoardRead(board);
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+async function saveReplyEdit(form) {
+  const fd = new FormData(form), id = form.dataset.id, body = fd.get('body').trim();
+  if (!body) { toast('Write something first.', 'bad'); return; }
+  const r = await sb.from('board_replies').update({ body }).eq('id', id);
+  if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+  MS.pop(); drawModal(); toast('Reply saved', 'ok'); loadAll();
+}
+async function postReply(form) {
+  const fd = new FormData(form), threadId = form.dataset.thread, body = fd.get('body').trim();
+  if (!body) { toast('Write something first.', 'bad'); return; }
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  const r = await sb.from('board_replies').insert({ thread_id: threadId, body, by_member: S.me.id });
+  if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); if (btn) btn.disabled = false; return; }
+  toast('Reply posted', 'ok'); await loadAll();
+}
+async function markBoardRead(board) {
+  if (!S.me) return;
+  const now = new Date().toISOString();
+  D.boardRead[board] = now;  // update the screen immediately; no need to wait on the network round trip
+  const r = await sb.from('board_reads').upsert({ member_id: S.me.id, board, last_read_at: now }, { onConflict: 'member_id,board' });
+  if (r.error) console.warn('Could not mark the board read:', r.error.message);
+}
+
 /* ---------- rendering ---------- */
 function renderTabs() {
   const el = $('#tabs'), who = $('#who');
@@ -1580,7 +1723,7 @@ function renderTabs() {
   const T = (k, l) => `<button data-action="tab" data-tab="${k}"${S.tab === k ? ' aria-current="page"' : ''}>${l}</button>`;
   const showMem = S.perms.view_roster || S.perms.manage_members;
   const showApp = S.perms.view_apparatus;
-  el.innerHTML = T('home', 'Home') + (S.me ? T('events', 'Events') : '') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '') + (S.perms.admin_setup ? T('records', 'Records') : '');
+  el.innerHTML = T('home', 'Home') + (S.me ? T('events', 'Events') + T('board', 'Board') : '') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '') + (S.perms.admin_setup ? T('records', 'Records') : '');
   who.innerHTML = `<button class="btn sm" data-action="signout">Sign out</button>`;
 }
 function render() {
@@ -1595,7 +1738,8 @@ function render() {
   if ((tab === 'rigs' || tab === 'equipment') && !S.perms.view_apparatus) tab = 'home';
   if (tab === 'records' && !S.perms.admin_setup) tab = 'home';
   if (tab === 'events' && !S.me) tab = 'home';
-  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : tab === 'records' ? recordsView() : tab === 'events' ? eventsView() : homeView());
+  if (tab === 'board' && !S.me) tab = 'home';
+  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : tab === 'records' ? recordsView() : tab === 'events' ? eventsView() : tab === 'board' ? messageBoardRoute() : homeView());
   renderTabs();
   drawModal();
 }
@@ -1651,10 +1795,14 @@ async function loadAll() {
       S.results = cr.data || [];
     } else { S.rigs = []; S.equipment = []; S.items = []; S.defs = []; S.sessions = []; S.results = []; }
     if (S.me) {
-      const [ev, sg, ea] = await Promise.all([sb.from('events').select('*').order('date'), sb.from('event_signups').select('*'), sb.from('event_attendance').select('*')]);
-      for (const r of [ev, sg, ea]) if (r.error) throw r.error;
+      const [ev, sg, ea, th, rp, br] = await Promise.all([
+        sb.from('events').select('*').order('date'), sb.from('event_signups').select('*'), sb.from('event_attendance').select('*'),
+        sb.from('board_threads').select('*'), sb.from('board_replies').select('*'), sb.from('board_reads').select('*').eq('member_id', S.me.id)
+      ]);
+      for (const r of [ev, sg, ea, th, rp, br]) if (r.error) throw r.error;
       S.events = ev.data || []; S.signups = sg.data || []; S.eventAttendanceRows = ea.data || [];
-    } else { S.events = []; S.signups = []; S.eventAttendanceRows = []; }
+      S.threads = th.data || []; S.replies = rp.data || []; S.boardReads = br.data || [];
+    } else { S.events = []; S.signups = []; S.eventAttendanceRows = []; S.threads = []; S.replies = []; S.boardReads = []; }
     if (S.perms.view_roster || S.perms.manage_training) {
       const [tr, at] = await Promise.all([sb.from('trainings').select('*').order('date', { ascending: false }), sb.from('training_attendance').select('*')]);
       for (const r of [tr, at]) if (r.error) throw r.error;
@@ -1668,7 +1816,7 @@ async function loadAll() {
 document.addEventListener('click', async e => {
   const el = e.target.closest('[data-action]'); if (!el) return;
   const a = el.dataset.action;
-  if (a === 'tab') { S.tab = el.dataset.tab; if (S.tab === 'rigs') S.rigId = null; if (S.tab === 'records' && S.audit === null && !S.auditLoading) loadAudit(); render(); window.scrollTo(0, 0); }
+  if (a === 'tab') { S.tab = el.dataset.tab; if (S.tab === 'rigs') S.rigId = null; if (S.tab === 'board') { S.brdBoard = null; S.brdThread = null; } if (S.tab === 'records' && S.audit === null && !S.auditLoading) loadAudit(); render(); window.scrollTo(0, 0); }
   else if (a === 'signout') { await sb.auth.signOut(); }
   else if (a === 'reload') { loadAll(); }
   else if (a === 'mem-open') { const id = el.dataset.id; MS.push(() => memSheet(id)); drawModal(); }
@@ -1729,6 +1877,9 @@ document.addEventListener('submit', async e => {
   if (e.target.id === 'f-ev') { e.preventDefault(); saveEvForm(e.target); return; }
   if (e.target.id === 'f-evadd') { e.preventDefault(); saveEvAdd(e.target); return; }
   if (e.target.id === 'f-tr') { e.preventDefault(); saveTrForm(e.target); return; }
+  if (e.target.id === 'f-thr') { e.preventDefault(); saveThreadForm(e.target); return; }
+  if (e.target.id === 'f-repedit') { e.preventDefault(); saveReplyEdit(e.target); return; }
+  if (e.target.id === 'f-reply') { e.preventDefault(); postReply(e.target); return; }
   if (e.target.id === 'f-rec') { e.preventDefault(); saveRecordForm(e.target); return; }
   if (e.target.id === 'f-msg') { e.preventDefault(); saveMsgForm(e.target); return; }
   if (e.target.id === 'f-rig') { e.preventDefault(); saveRigForm(e.target); return; }
