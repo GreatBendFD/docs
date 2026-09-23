@@ -168,7 +168,8 @@ const S = {
   members: [], reqs: [], records: [], messages: [], dismissed: new Set(), tab: 'home', mtab: 'roster', q: '', od: { none: true, soon: true },
   rigs: [], equipment: [], items: [], sessions: [], results: [], defs: [],
   rigId: null, rsub: 'checks', eq: { q: '', where: 'all', cat: 'all', ret: false }, showArch: {}, showBase: {}, defShow: 'open',
-  audit: null, auditLoading: false, auditError: '', pushState: 'unsupported', pushError: ''
+  audit: null, auditLoading: false, auditError: '', pushState: 'unsupported', pushError: '',
+  events: [], signups: [], trainings: [], attendanceRows: [], ev: { month: '', day: '', past: false }
 };
 let D = { latest: {}, memById: {} };
 const MS = [];
@@ -177,6 +178,7 @@ function resetState() {
   S.me = null; S.access = null; S.priv = null; S.perms = {}; S.members = []; S.reqs = []; S.records = []; S.messages = []; S.dismissed = new Set(); S.tab = 'home'; S.mtab = 'roster'; S.q = ''; S.od = { none: true, soon: true }; S.error = '';
   S.rigs = []; S.equipment = []; S.items = []; S.sessions = []; S.results = []; S.defs = []; S.rigId = null; S.rsub = 'checks'; S.eq = { q: '', where: 'all', cat: 'all', ret: false }; S.showArch = {}; S.showBase = {}; S.defShow = 'open';
   S.audit = null; S.auditLoading = false; S.auditError = ''; S.loading = false;
+  S.events = []; S.signups = []; S.trainings = []; S.attendanceRows = []; S.ev = { month: '', day: '', past: false };
   D = { latest: {}, memById: {} }; MS.length = 0;
 }
 
@@ -187,6 +189,10 @@ function derive() {
     const c = (D.latest[r.member_id] = D.latest[r.member_id] || {}), cur = c[r.requirement_id];
     if (!cur || (r.done_on || '') > (cur.done_on || '') || ((r.done_on || '') === (cur.done_on || '') && (r.created_at || '') > (cur.created_at || ''))) c[r.requirement_id] = r;
   }
+  D.signByEvent = {};
+  for (const s of S.signups) (D.signByEvent[s.event_id] = D.signByEvent[s.event_id] || {})[s.member_id] = s;
+  D.attendance = {};
+  for (const a of S.attendanceRows) (D.attendance[a.training_id] = D.attendance[a.training_id] || []).push(a.member_id);
   D.rigById = Object.fromEntries(S.rigs.map(r => [r.id, r]));
   D.eqById = Object.fromEntries(S.equipment.map(e => [e.id, e]));
   D.resBySession = {};
@@ -290,6 +296,7 @@ function homeView() {
       ${p.nys_id ? `<div class="sm muted" style="margin-top:6px">NYS training ID: <b style="color:var(--ink)">${esc(p.nys_id)}</b></div>` : ''}</div></div>
     <div class="sec" style="margin-top:0"><h3>My requirements</h3></div>
     <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${m.category ? 'Nothing is required for ' + esc(m.category) + ' members yet.' : 'No category is set on your record yet.'}</div>`}</div>
+    ${homeEvents()}
     ${homeAppStatus()}
     <p class="muted sm" style="margin-top:18px">Signed in as ${esc(session.user.email)}. Role: ${esc(roleLabel())}.</p>`;
 }
@@ -321,10 +328,11 @@ function reqsView() {
 function membersView() {
   const tabs = [['roster', 'Roster']];
   if (S.perms.view_roster) tabs.push(['overdue', 'Overdue']);
+  if (S.perms.view_roster || S.perms.manage_training) tabs.push(['training', 'Training']);
   if (S.perms.manage_members) tabs.push(['reqs', 'Requirements']);
   if (S.perms.post_messages) tabs.push(['msgs', 'Messages']);
   if (!tabs.some(t => t[0] === S.mtab)) S.mtab = 'roster';
-  const body = S.mtab === 'reqs' ? reqsView() : S.mtab === 'overdue' ? overdueView() : S.mtab === 'msgs' ? msgsView() : rosterView();
+  const body = S.mtab === 'reqs' ? reqsView() : S.mtab === 'overdue' ? overdueView() : S.mtab === 'training' ? trainingsView() : S.mtab === 'msgs' ? msgsView() : rosterView();
   return `<div class="head-row"><h1>Members</h1>${S.mtab === 'roster' && S.perms.manage_members ? '<button class="btn primary" data-action="mem-new">Add member</button>' : S.mtab === 'msgs' && S.perms.post_messages ? '<button class="btn primary" data-action="msg-new">Post a message</button>' : ''}</div>
     ${tabs.length > 1 ? `<div class="subtabs">${tabs.map(([k, l]) => `<button data-action="mtab" data-tab="${k}"${S.mtab === k ? ' aria-current="page"' : ''}>${l}</button>`).join('')}</div>` : ''}
     ${body}`;
@@ -1069,7 +1077,35 @@ const RIGACTIONS = {
   'exp-checks': () => exportChecks(),
   'exp-defs': () => exportDefs(),
   'exp-members': () => exportMembers(),
-  'exp-backup': () => exportFullBackup()
+  'exp-backup': () => exportFullBackup(),
+  'ev-new': () => { MS.push(() => evFormHtml(null)); drawModal(); evFormMount($('#modal-root')); },
+  'ev-open': el => { MS.push(() => evDetailSheet(el.dataset.id)); drawModal(); },
+  'ev-edit': el => { const e = S.events.find(x => x.id === el.dataset.id); if (e) { if (MS.length) MS.pop(); MS.push(() => evFormHtml(e)); drawModal(); evFormMount($('#modal-root')); } },
+  'ev-day': el => { S.ev.day = el.dataset.day && S.ev.day === el.dataset.day ? '' : el.dataset.day; render(); },
+  'ev-month': el => { const [y, m] = S.ev.month.split('-').map(Number); const d = new Date(y, m - 1 + Number(el.dataset.d), 1); S.ev.month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; S.ev.day = ''; render(); },
+  'ev-slot-add': () => { const c = document.querySelector('#slots'); if (c) c.insertAdjacentHTML('beforeend', slotRowHtml({ need: 4 })); },
+  'ev-slot-del': el => { const r = el.closest('.slot-row'); if (r) r.remove(); },
+  'ev-join': async el => {
+    const e = S.events.find(x => x.id === el.dataset.event); if (!e || !S.me) return;
+    const s = (e.slots || []).find(x => x.id === el.dataset.slot); if (!s) return;
+    const el2 = slotElig(s); if (!el2.ok) { toast(el2.why, 'bad'); return; }
+    if (slotFilled(e, s) >= (Number(s.need) || 0)) { toast('That row is full.', 'bad'); return; }
+    const r = await setSignup(e.id, S.me.id, s.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+    toast('You are signed up', 'ok'); loadAll();
+  },
+  'ev-leave': async el => {
+    const e = S.events.find(x => x.id === el.dataset.event); if (!e || !S.me) return;
+    const r = await setSignup(e.id, S.me.id, null); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+    toast('You are off the list', 'ok'); loadAll();
+  },
+  'ev-remove': async el => { const e = S.events.find(x => x.id === el.dataset.event); if (!e) return; const r = await setSignup(e.id, el.dataset.member, null); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast('Removed', 'ok'); loadAll(); },
+  'ev-addwho': el => { MS.push(() => evAddSheet(el.dataset.id)); drawModal(); },
+  'ev-cancel': async el => { const e = S.events.find(x => x.id === el.dataset.id); if (!e) return; if (MS.length) { MS.pop(); drawModal(); } const r = await sb.from('events').update({ cancelled: !e.cancelled }).eq('id', e.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast(e.cancelled ? 'Event reopened' : 'Event cancelled', 'ok'); loadAll(); },
+  'ev-del': async el => { const e = S.events.find(x => x.id === el.dataset.id); if (!e) return; if (!window.confirm('Delete this event? It disappears for everyone. Cancel it instead if people already signed up.')) return; if (MS.length) { MS.length = 0; drawModal(); } const r = await sb.from('events').update({ removed: true }).eq('id', e.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast('Event deleted', 'ok'); loadAll(); },
+  'tr-new': () => { MS.push(() => trFormHtml(null)); drawModal(); },
+  'tr-edit': el => { const t = S.trainings.find(x => x.id === el.dataset.id); if (t) { if (MS.length) MS.pop(); MS.push(() => trFormHtml(t)); drawModal(); } },
+  'tr-open': el => { MS.push(() => trDetailSheet(el.dataset.id)); drawModal(); },
+  'tr-save-att': el => { saveAttendance(el.dataset.id); }
 };
 
 /* ---------- records: exports and the change log ---------- */
@@ -1208,6 +1244,250 @@ function recordsView() {
     <div class="card list">${S.auditError ? `<div class="empty">Could not load the change log: ${esc(S.auditError)}</div>` : S.audit === null || S.auditLoading ? '<div class="empty">Loading…</div>' : S.audit.length ? S.audit.map(a => `<div class="li"><div class="t"><b>${esc(a.action)}</b><span class="muted sm">${esc(a.what)}</span></div><span class="muted sm" style="text-align:right">${esc(new Date(a.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}${a.actor_name ? '<br>' + esc(a.actor_name) : ''}</span></div>`).join('') : '<div class="empty">No changes logged yet.</div>'}</div>`;
 }
 
+/* ---------- events and manpower signup ---------- */
+const WEEKDAYS2 = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const ORD2 = ['', 'first', 'second', 'third', 'fourth', 'fifth'];
+const fmt2 = s => pd(s).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+const fmtTime = t => { if (!t) return ''; const [a, b] = t.split(':').map(Number); return `${a % 12 || 12}:${pad(b)} ${a >= 12 ? 'PM' : 'AM'}`; };
+const evWhen = e => fmt(e.date) + (e.start_time ? ', ' + fmtTime(e.start_time) + (e.end_time ? ' to ' + fmtTime(e.end_time) : '') : '');
+function nthWeekdayOf(y, m0, wd, nth) {
+  if (nth === 0) { const last = new Date(y, m0 + 1, 0); const diff = (last.getDay() - wd + 7) % 7; return iso(new Date(y, m0, last.getDate() - diff)); }
+  const first = new Date(y, m0, 1); const day = 1 + (wd - first.getDay() + 7) % 7 + (nth - 1) * 7;
+  return day <= new Date(y, m0 + 1, 0).getDate() ? iso(new Date(y, m0, day)) : null;
+}
+function repeatOptions(dateStr) {
+  const d = pd(dateStr), day = d.getDate(), dim = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(), wd = WEEKDAYS2[d.getDay()], nth = Math.ceil(day / 7);
+  const o = [['', 'Does not repeat'], ['7', 'Every week'], ['14', 'Every 2 weeks'], ['m', 'Every month on the same date (' + day + ')']];
+  if (nth <= 4) o.push(['nth:' + nth, `Every month on the ${ORD2[nth]} ${wd}`]);
+  if (day + 7 > dim) o.push(['last', 'Every month on the last ' + wd]);
+  return o;
+}
+function repeatDates(start, mode, n) {
+  const out = [start], d = pd(start);
+  for (let i = 1; i < n; i++) {
+    let x = null; const t = new Date(d.getFullYear(), d.getMonth() + i, 1);
+    if (mode === '7' || mode === '14') x = addDays(start, i * Number(mode));
+    else if (mode === 'm') x = addMonths(start, i);
+    else if (mode && mode.startsWith('nth:')) x = nthWeekdayOf(t.getFullYear(), t.getMonth(), d.getDay(), Number(mode.slice(4)));
+    else if (mode === 'last') x = nthWeekdayOf(t.getFullYear(), t.getMonth(), d.getDay(), 0);
+    if (x) out.push(x);
+  }
+  return out;
+}
+const evPeople = id => (D.signByEvent && D.signByEvent[id]) || {};
+const slotFilled = (e, s) => { const p = evPeople(e.id); return Object.values(p).filter(x => x.slot_id === s.id).length; };
+function evStatus(e) { const sl = e.slots || []; let need = 0, filled = 0; for (const s of sl) { const n = Number(s.need) || 0; need += n; filled += Math.min(slotFilled(e, s), n); } return { need, filled }; }
+const myEntry = e => S.me ? evPeople(e.id)[S.me.id] || null : null;
+function slotElig(s) {
+  const m = S.me; if (!m) return { ok: false, why: 'Your sign-in is not linked to a member record' };
+  if (s.cats && s.cats.length && !s.cats.includes(m.category)) return { ok: false, why: 'Open to ' + s.cats.join(' and ') + ' members' };
+  if (s.req) { const rq = S.reqs.find(r => r.id === s.req); const row = reqRows(m).find(x => x.req.id === s.req); if (!row || row.state === 'none' || row.state === 'overdue' || row.state === 'failed') return { ok: false, why: (rq ? rq.name : 'A requirement') + ' is not current' }; }
+  return { ok: true };
+}
+function evCard(e) {
+  const st = evStatus(e), mine = myEntry(e);
+  return `<button class="card eqcard${e.cancelled ? ' retired' : ''}" data-action="ev-open" data-id="${esc(e.id)}"><span class="top2"><b>${esc(e.title)}</b>${chip(e.category || 'Event')}</span><span class="muted sm">${esc(evWhen(e))}</span><span class="sm">${esc(e.location || '') || '&nbsp;'}</span><span class="rc-chips">${e.cancelled ? chip('Cancelled', 'bad') : st.need ? chip(`${st.filled} of ${st.need} filled`, st.filled >= st.need ? 'ok' : 'warn') : ''}${mine && !e.cancelled ? chip('You are signed up', 'ok') : ''}</span></button>`;
+}
+function homeEvents() {
+  const t = today(); const list = S.events.filter(e => !e.removed && !e.cancelled && e.date >= t).sort((a, b) => (a.date + (a.start_time || '')).localeCompare(b.date + (b.start_time || ''))).slice(0, 3);
+  if (!list.length) return '';
+  return `<div class="sec"><div class="spread"><h3>Upcoming events</h3><button class="btn ghost sm" data-action="tab" data-tab="events">See all</button></div></div><div class="eqlist">${list.map(evCard).join('')}</div>`;
+}
+function calHtml() {
+  const f = S.ev; const [y, mo] = f.month.split('-').map(Number); const lead = new Date(y, mo - 1, 1).getDay(), dim = new Date(y, mo, 0).getDate(), t = today();
+  const by = {}; for (const e of S.events) { if (!e.removed && e.date && e.date.startsWith(f.month)) (by[e.date] = by[e.date] || []).push(e); }
+  let cells = ''; for (let i = 0; i < lead; i++) cells += '<span class="blank"></span>';
+  for (let d = 1; d <= dim; d++) { const dt = `${f.month}-${pad(d)}`, ev = by[dt] || []; cells += `<button data-action="ev-day" data-day="${dt}"${dt === t ? ' class="today"' : ''}${f.day === dt ? ' class="sel"' : ''} aria-label="${esc(fmt(dt))}${ev.length ? ', ' + ev.length + ' ' + plural(ev.length, 'event') : ''}">${d}<span class="dots">${ev.slice(0, 3).map(e => { const s = evStatus(e); return `<i class="${e.cancelled ? 'off' : (s.need && s.filled >= s.need) ? 'full' : ''}"></i>`; }).join('')}</span></button>`; }
+  return `<div class="spread" style="margin-bottom:8px"><button class="btn sm" data-action="ev-month" data-d="-1" aria-label="Previous month">←</button><b style="font:700 20px 'Barlow Condensed',sans-serif">${esc(new Date(y, mo - 1, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' }))}</b><button class="btn sm" data-action="ev-month" data-d="1" aria-label="Next month">→</button></div>
+    <div class="cal">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map(d => `<span class="dow">${d}</span>`).join('')}${cells}</div>`;
+}
+function eventsList() {
+  const f = S.ev, t = today();
+  let list = S.events.filter(e => !e.removed).slice().sort((a, b) => (a.date + (a.start_time || '')).localeCompare(b.date + (b.start_time || '')));
+  if (f.day) list = list.filter(e => e.date === f.day); else if (!f.past) list = list.filter(e => e.date >= t); else list = list.reverse();
+  return list.length ? `<div class="eqlist">${list.map(evCard).join('')}</div>` : `<div class="card empty">${f.day ? 'Nothing on this day.' : 'No events coming up.'}</div>`;
+}
+function eventsView() {
+  const f = S.ev; if (!f.month) f.month = today().slice(0, 7);
+  return `<div class="head-row"><h1>Events</h1>${S.perms.manage_events ? '<button class="btn primary" data-action="ev-new">Add an event</button>' : ''}</div>
+    <div class="card pad" style="margin-bottom:14px">${calHtml()}</div>
+    <div class="spread" style="margin-bottom:10px"><h3>${f.day ? esc(fmt(f.day)) : f.past ? 'All events, newest first' : 'Coming up'}</h3><div class="row">${f.day ? '<button class="btn sm" data-action="ev-day" data-day="">Show all</button>' : `<label class="chk" style="min-height:36px"><input type="checkbox" id="ev-past"${f.past ? ' checked' : ''}>Include past events</label>`}</div></div>
+    <div id="ev-list">${eventsList()}</div>`;
+}
+function evText(e) {
+  const p = evPeople(e.id);
+  return `${e.title}\n${evWhen(e)}${e.location ? '\n' + e.location : ''}${e.cancelled ? '\nCANCELLED' : ''}\n\n` + (e.slots || []).map(s => { const names = Object.values(p).filter(x => x.slot_id === s.id).map(x => (D.memById[x.member_id] || {}).name || '?'); return `${s.label} (${names.length} of ${s.need}): ${names.join(', ') || 'nobody yet'}`; }).join('\n');
+}
+function evDetailSheet(id) {
+  const e = S.events.find(x => x.id === id);
+  if (!e || e.removed) return sheet('Event', '<div class="empty">This event no longer exists.</div>', '<button class="btn" data-action="m-close">Close</button>');
+  const t = today(), past = e.date < t, p = evPeople(id), mine = myEntry(e), mgr = S.perms.manage_events, m = S.me;
+  const slots = (e.slots || []).map(s => {
+    const rows = Object.values(p).filter(x => x.slot_id === s.id).sort((a, b) => ((D.memById[a.member_id] || {}).name || '').localeCompare((D.memById[b.member_id] || {}).name || ''));
+    const n = Number(s.need) || 0, full = rows.length >= n, el = slotElig(s), rq = s.req ? S.reqs.find(r => r.id === s.req) : null;
+    let action = '';
+    if (mine && mine.slot_id === s.id && !past && !e.cancelled) action = `<button class="btn sm" data-action="ev-leave" data-event="${esc(id)}">Leave</button>`;
+    else if (!past && !e.cancelled && m) { action = !el.ok ? `<span class="muted sm">${esc(el.why)}</span>` : full ? '<span class="muted sm">Full</span>' : `<button class="btn sm primary" data-action="ev-join" data-event="${esc(id)}" data-slot="${esc(s.id)}">${mine ? 'Switch here' : 'Sign up'}</button>`; }
+    return `<div class="card pad stack" style="gap:8px"><div class="spread"><b>${esc(s.label)}</b><span class="row">${chip(`${rows.length} of ${n}`, rows.length >= n ? 'ok' : 'warn')}${rows.length > n ? chip('Over by ' + (rows.length - n), 'bad') : ''}</span></div>
+      <div class="muted sm">${s.cats && s.cats.length ? 'Open to ' + esc(s.cats.join(' and ')) + ' members. ' : 'Open to any member. '}${rq ? 'Needs a current ' + esc(rq.name) + '.' : ''}</div>
+      <div class="who">${rows.length ? rows.map(x => { const mm = D.memById[x.member_id]; return `<span class="chip${x.member_id === (m && m.id) ? ' ok' : ''}">${esc(mm ? mm.name : '?')}${mgr && !past ? `<button aria-label="Remove ${esc(mm ? mm.name : '')}" data-action="ev-remove" data-event="${esc(id)}" data-member="${esc(x.member_id)}">×</button>` : ''}</span>`; }).join('') : '<span class="muted sm">Nobody yet</span>'}</div>
+      ${action ? `<div class="row">${action}</div>` : ''}</div>`;
+  }).join('');
+  const body = `<div class="rc-chips" style="margin-bottom:10px">${chip(e.category || 'Event')}${e.cancelled ? chip('Cancelled', 'bad') : past ? chip('Past') : ''}${mine && !e.cancelled ? chip('You are signed up', 'ok') : ''}</div>
+    <div class="card pad stack" style="gap:4px"><b>${esc(evWhen(e))}</b>${e.location ? `<span>${esc(e.location)}</span>` : ''}${e.description ? `<span class="muted" style="white-space:pre-wrap;margin-top:6px">${esc(e.description)}</span>` : ''}</div>
+    ${!m && !mgr ? '<div class="banner" style="margin-top:10px">Your sign-in is not linked to a member record, so you cannot sign up yet. Ask an administrator to link it.</div>' : ''}
+    <div class="sec"><h3>Who is needed</h3></div><div class="stack">${slots || '<div class="card empty">No signup slots for this event.</div>'}</div>`;
+  const foot = `<button class="btn" data-action="m-close">Close</button>${mgr ? `<button class="btn" data-action="copy" data-v="${esc(evText(e))}">Copy list</button>${!past && !e.cancelled ? `<button class="btn" data-action="ev-addwho" data-id="${esc(id)}">Add someone</button>` : ''}<button class="btn primary" data-action="ev-edit" data-id="${esc(id)}">Edit</button>` : ''}`;
+  return sheet(esc(e.title), body, foot);
+}
+function slotRowHtml(s) {
+  s = s || {}; const reqs = S.reqs.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0));
+  return `<div class="slot-row card pad stack"><input type="hidden" name="slot_id" value="${esc(s.id || '')}">
+    <div class="two"><label class="f"><span>Who is needed</span><input name="slot_label" value="${esc(s.label || '')}" placeholder="Firefighters, Fire police, Any member"></label><label class="f"><span>How many</span><input name="slot_need" type="number" min="1" value="${esc(s.need || 4)}"></label></div>
+    <div class="f"><span>Open to</span><div class="aud">${CATS.map(c => `<label class="chk"><input type="checkbox" name="slot_cat" value="${esc(c)}"${(s.cats || []).includes(c) ? ' checked' : ''}><span>${esc(c)}</span></label>`).join('')}</div><span class="muted sm">Leave all unchecked for any member.</span></div>
+    <label class="f"><span>Must have a current</span><select name="slot_req"><option value="">Nothing required</option>${reqs.map(r => `<option value="${esc(r.id)}"${s.req === r.id ? ' selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
+    <button type="button" class="btn sm danger" data-action="ev-slot-del">Remove this row</button></div>`;
+}
+function evFormHtml(e) {
+  const x = e || { date: today(), slots: [{ id: '', label: 'Any member', need: 6, cats: [], req: '' }] };
+  return `<div class="sheet-h"><div><h2>${e ? 'Edit event' : 'Add an event'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-ev" class="form" data-id="${esc(x.id || '')}">
+      <label class="f"><span>Title</span><input name="title" value="${esc(x.title || '')}" required placeholder="Monthly meeting, hose testing, parade detail"></label>
+      <div class="two"><label class="f"><span>Type</span><input name="category" list="dl-evcat" value="${esc(x.category || '')}"></label><label class="f"><span>Date</span><input name="date" type="date" value="${esc(x.date || today())}" required></label></div>
+      <div class="two"><label class="f"><span>Starts</span><input name="start_time" type="time" value="${esc(x.start_time || '')}"></label><label class="f"><span>Ends</span><input name="end_time" type="time" value="${esc(x.end_time || '')}"></label></div>
+      <label class="f"><span>Where</span><input name="location" value="${esc(x.location || '')}" placeholder="Station 24"></label>
+      <label class="f"><span>Details</span><textarea name="description" placeholder="What to bring, who to contact">${esc(x.description || '')}</textarea></label>
+      <div class="sec" style="margin:4px 0"><h3>Manpower</h3><span class="muted sm">Add a row for each kind of help you need. Members sign up for one row.</span></div>
+      <div id="slots" class="stack">${(x.slots || []).map(slotRowHtml).join('')}</div>
+      <div><button type="button" class="btn sm" data-action="ev-slot-add">Add a row</button></div>
+      ${e ? (x.series ? `<label class="chk"><input type="checkbox" name="applyall">Apply these changes to this and all later events in the series</label><div class="muted sm" style="margin-top:-6px">Each keeps its own date and its own signups.</div>` : '') : `<div class="two"><label class="f"><span>Repeat</span><select name="repeat" id="ev-repeat"><option value="">Does not repeat</option></select></label><label class="f" data-rep-wrap hidden><span>How many in all</span><input name="repeat_n" type="number" min="2" max="36" value="6"></label></div>
+      <div class="muted sm" id="ev-repprev" style="margin-top:-6px"></div>
+      <label class="chk"><input type="checkbox" name="announce" checked>Also post a message on everyone's home page</label>`}
+      <datalist id="dl-evcat">${EV_CATS.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${e ? `<button class="btn danger" data-action="ev-cancel" data-id="${esc(x.id)}">${x.cancelled ? 'Reopen' : 'Cancel event'}</button><button class="btn danger" data-action="ev-del" data-id="${esc(x.id)}">Delete</button>` : ''}${saveBtn('f-ev')}</div>`;
+}
+const EV_CATS = ['Training', 'Meeting', 'Drill', 'Detail or standby', 'Fundraiser', 'Community event', 'Other'];
+function evFormMount(root) {
+  const f = root.querySelector('#f-ev'); if (!f) return;
+  const sel = f.elements.repeat; if (sel) {
+    const dI = f.elements.date, nI = f.elements.repeat_n, w = root.querySelector('[data-rep-wrap]'), pv = root.querySelector('#ev-repprev');
+    const upd = () => { w.hidden = !sel.value; if (!sel.value || !dI.value) { pv.textContent = ''; return; } const n = Math.min(36, Math.max(2, Number(nI.value) || 6)); const ds = repeatDates(dI.value, sel.value, n); pv.textContent = ds.length + ' events: ' + ds.slice(0, 6).map(fmt2).join('; ') + (ds.length > 6 ? '; and ' + (ds.length - 6) + ' more' : '') + (ds.length < n ? '. Some months have no such day, so fewer than ' + n + ' were found.' : ''); };
+    const build = () => { const cur = sel.value, opts = repeatOptions(dI.value || today()); sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join(''); const keep = opts.find(o => o[0] === cur) || (cur.startsWith('nth:') ? opts.find(o => o[0].startsWith('nth:')) : null); sel.value = keep ? keep[0] : ''; upd(); };
+    dI.addEventListener('change', build); sel.addEventListener('change', upd); nI.addEventListener('input', upd); build();
+  }
+}
+async function saveEvForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null;
+  if (!fd.get('title').trim() || !fd.get('date')) { toast('Add a title and a date.', 'bad'); return; }
+  const slots = [...form.querySelectorAll('.slot-row')].map(r => ({ id: r.querySelector('[name=slot_id]').value || ('s' + Math.random().toString(36).slice(2)), label: (r.querySelector('[name=slot_label]').value || '').trim() || 'Any member', need: Math.max(1, Number(r.querySelector('[name=slot_need]').value) || 1), cats: [...r.querySelectorAll('[name=slot_cat]:checked')].map(c => c.value), req: r.querySelector('[name=slot_req]').value || '' }));
+  const data = { title: fd.get('title').trim(), category: (fd.get('category') || '').trim(), date: fd.get('date'), start_time: fd.get('start_time') || '', end_time: fd.get('end_time') || '', location: (fd.get('location') || '').trim(), description: (fd.get('description') || '').trim(), slots };
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    if (id) {
+      const cur = S.events.find(x => x.id === id);
+      const r = await sb.from('events').update(data).eq('id', id); if (r.error) throw r.error;
+      let more = 0;
+      if (fd.get('applyall') && cur && cur.series) {
+        const { date: _d, ...rest } = data;
+        for (const o of S.events.filter(x => x.series === cur.series && !x.removed && x.id !== id && x.date >= cur.date)) { const ur = await sb.from('events').update(rest).eq('id', o.id); if (!ur.error) more++; }
+      }
+      MS.pop(); drawModal(); toast(more ? `Saved, and updated ${more} later event(s)` : 'Event saved', 'ok'); loadAll();
+      return;
+    }
+    const rep = fd.get('repeat');
+    const n = rep ? Math.min(36, Math.max(2, Number(fd.get('repeat_n')) || 6)) : 1;
+    const dates = rep ? repeatDates(data.date, rep, n) : [data.date];
+    const series = dates.length > 1 ? 'ser' + Math.random().toString(36).slice(2) : null;
+    for (const d of dates) { const r = await sb.from('events').insert({ ...data, date: d, series, cancelled: false, removed: false, by_member: S.me ? S.me.id : null }); if (r.error) throw r.error; }
+    if (fd.get('announce')) await sb.from('messages').insert({ body: `New event: ${data.title}, ${evWhen(data)}${data.location ? ' at ' + data.location : ''}${dates.length > 1 ? ' (repeats, ' + dates.length + ' dates)' : ''}. Sign up under Events.`, tone: 'info', aud_all: true, aud_cats: [], starts_on: today(), ends_on: data.date, by_member: S.me ? S.me.id : null, removed: false }).catch(() => {});
+    MS.pop(); drawModal(); toast(dates.length > 1 ? dates.length + ' events added' : 'Event added', 'ok'); loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+async function setSignup(eventId, memberId, slotId) {
+  if (slotId) { const r = await sb.from('event_signups').upsert({ event_id: eventId, member_id: memberId, slot_id: slotId }, { onConflict: 'event_id,member_id' }); return r; }
+  return await sb.from('event_signups').delete().eq('event_id', eventId).eq('member_id', memberId);
+}
+function evAddSheet(id) {
+  const e = S.events.find(x => x.id === id); if (!e) return '';
+  const p = evPeople(id), mem = S.members.filter(m => m.status !== 'inactive').sort((a, b) => a.name.localeCompare(b.name));
+  return sheet('Add someone', `<form id="f-evadd" class="form" data-id="${esc(id)}">
+    <label class="f"><span>Member</span><select name="member">${mem.map(m => `<option value="${esc(m.id)}">${esc(m.name)}${p[m.id] ? ' (already signed up)' : ''}</option>`).join('')}</select></label>
+    <label class="f"><span>Row</span><select name="slot">${(e.slots || []).map(s => `<option value="${esc(s.id)}">${esc(s.label)}</option>`).join('')}</select></label>
+    <p class="muted sm">Adding someone here skips the row's category and requirement checks, so you can place anyone you choose.</p></form>`, `<button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-evadd', 'Add')}`, esc(e.title));
+}
+async function saveEvAdd(form) {
+  const fd = new FormData(form), id = form.dataset.id; const m = D.memById[fd.get('member')];
+  const r = await setSignup(id, fd.get('member'), fd.get('slot')); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+  MS.pop(); drawModal(); toast('Added', 'ok'); loadAll();
+}
+
+/* ---------- trainings and attendance ---------- */
+const REQ_FREQ_LOOKUP = () => Object.fromEntries(S.reqs.map(r => [r.id, r]));
+function trainingsView() {
+  const list = S.trainings.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const reqById = REQ_FREQ_LOOKUP();
+  return `<div class="head-row"><div><h3>Trainings</h3><span class="muted sm">Meetings, drills and classes, with who attended.</span></div>${S.perms.manage_training ? '<button class="btn primary" data-action="tr-new">Add a training</button>' : ''}</div>
+    <div class="card list">${list.length ? list.map(t => {
+      const n = (D.attendance[t.id] || []).length, rq = t.satisfies_requirement_id ? reqById[t.satisfies_requirement_id] : null;
+      return `<div class="li"><div class="t"><button class="btn ghost" style="padding:0;min-height:0;justify-content:flex-start;font-weight:600;color:var(--ink);text-align:left" data-action="tr-open" data-id="${esc(t.id)}">${esc(t.title)}</button><span class="muted sm">${esc(fmt(t.date))}${t.hours ? ', ' + t.hours + ' ' + plural(Number(t.hours), 'hour') : ''}${t.instructor ? ', taught by ' + esc(t.instructor) : ''}${rq ? '. Satisfies ' + esc(rq.name) : ''}</span></div><div class="acts">${chip(n + ' ' + plural(n, 'attendee'))}</div></div>`;
+    }).join('') : '<div class="empty">No trainings logged yet.</div>'}</div>`;
+}
+function trFormHtml(t) {
+  const x = t || { date: today() };
+  const reqs = S.reqs.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0));
+  return `<div class="sheet-h"><div><h2>${t ? 'Edit training' : 'Add a training'}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
+    <div class="sheet-b"><form id="f-tr" class="form" data-id="${esc(x.id || '')}">
+      <label class="f"><span>Title</span><input name="title" value="${esc(x.title || '')}" required placeholder="OSHA 8-hour refresher"></label>
+      <div class="two"><label class="f"><span>Date</span><input name="date" type="date" value="${esc(x.date || today())}" required max="${today()}"></label><label class="f"><span>Hours</span><input name="hours" type="number" step="0.5" min="0" value="${esc(x.hours || '')}"></label></div>
+      <label class="f"><span>Instructor</span><input name="instructor" value="${esc(x.instructor || '')}"></label>
+      <label class="f"><span>Topic covered</span><textarea name="topic" placeholder="What the session covered">${esc(x.topic || '')}</textarea></label>
+      <label class="f"><span>This training satisfies</span><select name="req"><option value="">Nothing in particular</option>${reqs.map(r => `<option value="${esc(r.id)}"${x.satisfies_requirement_id === r.id ? ' selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
+      <div class="muted sm" style="margin-top:-6px">If you choose one above, marking someone present will also record it as completed for them, dated to this training.</div>
+      <label class="f"><span>Notes</span><textarea name="notes">${esc(x.notes || '')}</textarea></label>
+    </form></div>
+    <div class="sheet-f"><button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-tr')}</div>`;
+}
+async function saveTrForm(form) {
+  const fd = new FormData(form), id = form.dataset.id || null;
+  if (!fd.get('title').trim() || !fd.get('date')) { toast('Add a title and a date.', 'bad'); return; }
+  const data = { title: fd.get('title').trim(), date: fd.get('date'), hours: fd.get('hours') ? Number(fd.get('hours')) : null, instructor: (fd.get('instructor') || '').trim(), topic: (fd.get('topic') || '').trim(), satisfies_requirement_id: fd.get('req') || null, notes: (fd.get('notes') || '').trim() };
+  const btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+  try {
+    if (id) { const r = await sb.from('trainings').update(data).eq('id', id); if (r.error) throw r.error; }
+    else { const r = await sb.from('trainings').insert({ ...data, created_by: S.me ? S.me.id : null }); if (r.error) throw r.error; }
+    MS.pop(); drawModal(); toast('Training saved', 'ok'); loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+function trDetailSheet(id) {
+  const t = S.trainings.find(x => x.id === id);
+  if (!t) return sheet('Training', '<div class="empty">This training no longer exists.</div>', '<button class="btn" data-action="m-close">Close</button>');
+  const rq = t.satisfies_requirement_id ? S.reqs.find(r => r.id === t.satisfies_requirement_id) : null;
+  const attended = new Set(D.attendance[t.id] || []);
+  const list = S.members.filter(m => m.status !== 'inactive').sort((a, b) => a.name.localeCompare(b.name));
+  const kv = (k, v) => v ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : '';
+  const body = `<div class="card pad"><dl class="kv">${kv('Date', fmt(t.date))}${kv('Hours', t.hours)}${kv('Instructor', t.instructor)}${kv('Topic', t.topic)}${rq ? kv('Satisfies', rq.name) : ''}${kv('Notes', t.notes)}</dl></div>
+    <div class="sec"><h3>Attendance</h3><span class="muted sm">${attended.size} of ${list.length} marked present.${rq ? ' Checking someone here records their ' + esc(rq.name) + ' as done today.' : ''}</span></div>
+    <div class="card list">${list.map(m => `<label class="li" style="cursor:pointer"><div class="t"><b>${esc(m.name)}</b><span class="muted sm">${esc(m.category || 'No category')}</span></div><input type="checkbox" class="tr-att" data-id="${esc(m.id)}"${attended.has(m.id) ? ' checked disabled' : ''} style="width:22px;height:22px;accent-color:var(--navy)"></label>`).join('')}</div>`;
+  const foot = `<button class="btn" data-action="m-close">Close</button>${S.perms.manage_training ? `<button class="btn" data-action="tr-edit" data-id="${esc(id)}">Edit</button><button class="btn primary" data-action="tr-save-att" data-id="${esc(id)}">Save attendance</button>` : ''}`;
+  return sheet(esc(t.title), body, foot, fmt(t.date));
+}
+async function saveAttendance(trainingId) {
+  const checked = [...document.querySelectorAll('.tr-att:checked:not(:disabled)')].map(el => el.dataset.id);
+  if (!checked.length) { toast('Check at least one new attendee, or close if nobody new attended.', 'bad'); return; }
+  const btn = document.querySelector('[data-action=tr-save-att]'); if (btn) btn.disabled = true;
+  try {
+    const t = S.trainings.find(x => x.id === trainingId);
+    const rows = checked.map(member_id => ({ training_id: trainingId, member_id }));
+    const r = await sb.from('training_attendance').insert(rows); if (r.error) throw r.error;
+    if (t && t.satisfies_requirement_id) {
+      const recs = checked.map(member_id => ({ member_id, requirement_id: t.satisfies_requirement_id, done_on: t.date, due_on: null, approx: false, result: 'Pass', notes: 'Training: ' + t.title, recorded_by: S.me ? S.me.id : null }));
+      const rr = await sb.from('member_records').insert(recs); if (rr.error) throw rr.error;
+    }
+    MS.pop(); drawModal(); toast(`Marked ${checked.length} present`, 'ok'); loadAll();
+  } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); if (btn) btn.disabled = false; }
+}
+
 /* ---------- rendering ---------- */
 function renderTabs() {
   const el = $('#tabs'), who = $('#who');
@@ -1215,7 +1495,7 @@ function renderTabs() {
   const T = (k, l) => `<button data-action="tab" data-tab="${k}"${S.tab === k ? ' aria-current="page"' : ''}>${l}</button>`;
   const showMem = S.perms.view_roster || S.perms.manage_members;
   const showApp = S.perms.view_apparatus;
-  el.innerHTML = T('home', 'Home') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '') + (S.perms.admin_setup ? T('records', 'Records') : '');
+  el.innerHTML = T('home', 'Home') + (S.me ? T('events', 'Events') : '') + (showApp ? T('rigs', 'Apparatus') + T('equipment', 'Equipment') : '') + (showMem ? T('members', 'Members') : '') + (S.perms.admin_setup ? T('records', 'Records') : '');
   who.innerHTML = `<button class="btn sm" data-action="signout">Sign out</button>`;
 }
 function render() {
@@ -1229,7 +1509,8 @@ function render() {
   let tab = S.tab; if (tab === 'members' && !(S.perms.view_roster || S.perms.manage_members)) tab = 'home';
   if ((tab === 'rigs' || tab === 'equipment') && !S.perms.view_apparatus) tab = 'home';
   if (tab === 'records' && !S.perms.admin_setup) tab = 'home';
-  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : tab === 'records' ? recordsView() : homeView());
+  if (tab === 'events' && !S.me) tab = 'home';
+  v.innerHTML = shell(tab === 'members' ? membersView() : tab === 'rigs' ? (S.rigId ? rigDetail(S.rigId) : rigsView()) : tab === 'equipment' ? equipmentView() : tab === 'records' ? recordsView() : tab === 'events' ? eventsView() : homeView());
   renderTabs();
   drawModal();
 }
@@ -1284,6 +1565,16 @@ async function loadAll() {
       if (cr.error) throw cr.error;
       S.results = cr.data || [];
     } else { S.rigs = []; S.equipment = []; S.items = []; S.defs = []; S.sessions = []; S.results = []; }
+    if (S.me) {
+      const [ev, sg] = await Promise.all([sb.from('events').select('*').order('date'), sb.from('event_signups').select('*')]);
+      for (const r of [ev, sg]) if (r.error) throw r.error;
+      S.events = ev.data || []; S.signups = sg.data || [];
+    } else { S.events = []; S.signups = []; }
+    if (S.perms.view_roster || S.perms.manage_training) {
+      const [tr, at] = await Promise.all([sb.from('trainings').select('*').order('date', { ascending: false }), sb.from('training_attendance').select('*')]);
+      for (const r of [tr, at]) if (r.error) throw r.error;
+      S.trainings = tr.data || []; S.attendanceRows = at.data || [];
+    } else { S.trainings = []; S.attendanceRows = []; }
   } catch (e) { S.error = (e && e.message) || String(e); }
   S.loading = false; derive(); render();
 }
@@ -1329,6 +1620,7 @@ document.addEventListener('change', async e => {
   const t = e.target;
   if (t.dataset && t.dataset.od) { S.od[t.dataset.od] = t.checked; const l = $('#od-list'); if (l) l.innerHTML = odList(); return; }
   if (['eq-where', 'eq-cat', 'eq-ret'].includes(t.id)) { S.eq.where = $('#eq-where').value; S.eq.cat = $('#eq-cat').value; S.eq.ret = $('#eq-ret').checked; const l = $('#eq-list'); if (l) l.innerHTML = eqList(); return; }
+  if (t.id === 'ev-past') { S.ev.past = t.checked; const l = $('#ev-list'); if (l) l.innerHTML = eventsList(); return; }
   if (t.dataset && t.dataset.unk) return;  // handled by unkMount's own listener
   if (t.dataset && t.dataset.ckChk && CK) { CK[t.dataset.ckChk] = t.checked; drawModal(); return; }
   if (t.dataset && t.dataset.change === 'it-excl') {
@@ -1349,6 +1641,9 @@ document.addEventListener('input', e => {
 document.addEventListener('submit', async e => {
   if (e.target.id === 'f-mem') { e.preventDefault(); saveMemberForm(e.target); return; }
   if (e.target.id === 'f-req') { e.preventDefault(); saveReqForm(e.target); return; }
+  if (e.target.id === 'f-ev') { e.preventDefault(); saveEvForm(e.target); return; }
+  if (e.target.id === 'f-evadd') { e.preventDefault(); saveEvAdd(e.target); return; }
+  if (e.target.id === 'f-tr') { e.preventDefault(); saveTrForm(e.target); return; }
   if (e.target.id === 'f-rec') { e.preventDefault(); saveRecordForm(e.target); return; }
   if (e.target.id === 'f-msg') { e.preventDefault(); saveMsgForm(e.target); return; }
   if (e.target.id === 'f-rig') { e.preventDefault(); saveRigForm(e.target); return; }
