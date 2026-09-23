@@ -362,7 +362,22 @@ function memSheet(id) {
       ${m.joined || probInfo(m) ? `<div class="sm muted" style="margin:-4px 0 12px">${m.joined ? 'Joined ' + esc(fmt(m.joined)) + (tenure(m.joined) ? ' (' + esc(tenure(m.joined)) + '). ' : '. ') : ''}${esc(probLine(m))}</div>` : ''}
       <div class="sec" style="margin-top:0"><h3>Requirements</h3></div>
       <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${canSee ? 'Nothing is required yet.' : 'You can see the directory but not training records.'}</div>`}</div></div>
-    <div class="sheet-f"><button class="btn" data-action="m-close">Close</button>${S.perms.admin_setup ? `<button class="btn danger" data-action="mem-delete" data-id="${esc(id)}">Delete</button>` : ''}${S.perms.manage_members ? `<button class="btn primary" data-action="mem-edit" data-id="${esc(id)}">Edit</button>` : ''}</div>`;
+    <div class="sheet-f"><button class="btn" data-action="m-close">Close</button>${S.perms.admin_setup ? `<button class="btn danger" data-action="mem-delete" data-id="${esc(id)}">Delete</button>` : ''}${S.perms.manage_members && id !== (S.me && S.me.id) ? `<button class="btn" data-action="mem-invite" data-id="${esc(id)}">${m.user_id ? 'Resend invite' : 'Send invite'}</button>` : ''}${S.perms.manage_members ? `<button class="btn primary" data-action="mem-edit" data-id="${esc(id)}">Edit</button>` : ''}</div>`;
+}
+async function sendOneInvite(id) {
+  const m = D.memById[id]; if (!m) return;
+  const btn = document.querySelector('[data-action=mem-invite]'); if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const r = await sb.functions.invoke('invite-members', { body: { member_ids: [id], allow_reinvite: true } });
+    if (r.error) { r.error.message = await functionErrorMessage(r.error); throw r.error; }
+    const d = r.data || {};
+    if (d.invited) toast(`Invited ${m.name}`, 'ok');
+    else if (d.reinvited) toast(`Sent ${m.name} a fresh invite -- their earlier one had never been completed`, 'ok');
+    else if (d.skippedActive) toast(`${m.name} already has a working account and is signed in -- nothing was sent`, 'bad');
+    else toast(d.note || 'Nothing was sent.', 'bad');
+    if (d.errors && d.errors.length) console.warn('Invite failure:', d.errors);
+  } catch (e) { toast('Could not send: ' + ((e && e.message) || String(e)), 'bad'); }
+  if (btn) { btn.disabled = false; btn.textContent = m.user_id ? 'Resend invite' : 'Send invite'; }
 }
 async function deleteMember(id) {
   const m = D.memById[id]; if (!m) return;
@@ -1833,6 +1848,7 @@ document.addEventListener('click', async e => {
   else if (a === 'mem-new') { openMemberForm(null); }
   else if (a === 'mem-edit') { if (MS.length) MS.pop(); openMemberForm(el.dataset.id); }
   else if (a === 'mem-delete') { deleteMember(el.dataset.id); }
+  else if (a === 'mem-invite') { sendOneInvite(el.dataset.id); }
   else if (a === 'invite-members') { openInvitePicker(); }
   else if (a === 'invite-pick-all') { document.querySelectorAll('.invite-pick').forEach(el => el.checked = true); }
   else if (a === 'invite-pick-none') { document.querySelectorAll('.invite-pick').forEach(el => el.checked = false); }
