@@ -535,7 +535,7 @@ const odAllText = () => { const gs = odGroups(); if (!gs.length) return 'Nobody 
 function odList() {
   const gs = odGroups();
   if (!gs.length) return '<div class="card empty">Nobody needs attention. Everyone is current.</div>';
-  return `<div class="stack">${gs.map(g => `<div class="card"><div class="grp spread"><span>${esc(g.m.name)} <span class="muted sm">${esc(g.m.category || 'No category')}</span></span><button class="btn sm" data-action="copy" data-v="${esc(odReminder(g))}">Copy reminder</button></div><div class="list">${g.rows.map(x => `<div class="li"><div class="t"><b>${esc(x.req.name)}</b><span class="muted sm">${x.rec ? (x.rec.done_on ? (x.rec.approx ? 'Done in ' + esc(x.rec.done_on.slice(0, 4)) : 'Last done ' + esc(fmt(x.rec.done_on))) : 'On record, no date') : 'Nothing recorded'}</span></div><div class="acts">${reqChip(x)}</div></div>`).join('')}</div></div>`).join('')}</div>`;
+  return `<div class="stack">${gs.map(g => `<div class="card"><div class="grp spread"><span>${esc(g.m.name)} <span class="muted sm">${esc(g.m.category || 'No category')}</span></span><span class="row">${g.m.id !== (S.me && S.me.id) ? `<button class="btn sm" data-action="od-push" data-id="${esc(g.m.id)}">Push a reminder</button>` : ''}<button class="btn sm" data-action="copy" data-v="${esc(odReminder(g))}">Copy reminder</button></span></div><div class="list">${g.rows.map(x => `<div class="li"><div class="t"><b>${esc(x.req.name)}</b><span class="muted sm">${x.rec ? (x.rec.done_on ? (x.rec.approx ? 'Done in ' + esc(x.rec.done_on.slice(0, 4)) : 'Last done ' + esc(fmt(x.rec.done_on))) : 'On record, no date') : 'Nothing recorded'}</span></div><div class="acts">${reqChip(x)}</div></div>`).join('')}</div></div>`).join('')}</div>`;
 }
 function overdueView() {
   const gs = odGroups();
@@ -997,15 +997,18 @@ async function saveCheck() {
     const results = todo.map(it => { const x = CK.res[it.id]; const eq = it.scope_type === 'equipment' ? D.eqById[it.equipment_id] : null; return { session_id: sr.data.id, item_id: it.id, item_name: it.name, equipment_id: eq ? eq.id : null, equipment_name: eq ? eq.name : '', status: x.mode === 'ok' ? 'ok' : x.s, comment: x.mode === 'prob' ? (x.c || '').trim() : '' }; });
     const rr = await sb.from('check_results').insert(results); if (rr.error) throw rr.error;
     const probs = results.filter(r => r.status !== 'ok');
+    let newDefs = 0;
     for (const p of probs) {
       if (S.defs.some(d => !d.closed && d.item_id === p.item_id && d.rig_id === rigIdForDb)) continue;
       const dr = await sb.from('deficiencies').insert({ rig_id: rigIdForDb, item_id: p.item_id, item_name: p.item_name, equipment_id: p.equipment_id, equipment_name: p.equipment_name, status: p.status, comment: p.comment, found_date: CK.date, found_by: S.me.name });
       if (dr.error) throw dr.error;
+      newDefs++;
     }
     if (CK.meter && rigIdForDb) { const ur = await sb.from('rigs').update({ meter: CK.meter, meter_date: CK.date }).eq('id', rigIdForDb); if (ur.error) throw ur.error; }
     MS.pop(); CK = null; drawModal();
     toast(probs.length ? `Check saved. ${probs.length} ${plural(probs.length, 'deficiency', 'deficiencies')} logged.` : 'Check saved. Everything OK.', probs.length ? '' : 'ok');
     loadAll();
+    if (newDefs) { const rig = D.rigById[rigIdForDb]; pushAlert(`${newDefs} new ${plural(newDefs, 'deficiency', 'deficiencies')} logged during today's check on ${rig ? rig.unit : 'the station'}.`); }
   } catch (e) { toast('Could not save: ' + ((e && e.message) || String(e)), 'bad'); CK.saving = false; drawModal(); }
 }
 /* ---------- deficiency edit ---------- */
@@ -1034,7 +1037,22 @@ async function toggleOOS(id) {
   if (r.status === 'out_of_service') { const u = await sb.from('rigs').update({ status: 'in_service', oos_reason: '', oos_since: null }).eq('id', id); if (u.error) { toast('Could not save: ' + u.error.message, 'bad'); return; } toast(r.unit + ' is back in service', 'ok'); loadAll(); return; }
   MS.push(() => sheet('Mark out of service', `<form id="f-oos" class="form" data-id="${esc(id)}"><label class="f"><span>Reason</span><input name="reason" required placeholder="Pump leak, awaiting repair"></label></form>`, `<button class="btn" data-action="m-close">Cancel</button>${saveBtn('f-oos', 'Mark out of service')}`, esc(r.unit))); drawModal();
 }
-async function saveOOS(form) { const fd = new FormData(form), id = form.dataset.id; const r = await sb.from('rigs').update({ status: 'out_of_service', oos_reason: (fd.get('reason') || '').trim(), oos_since: today() }).eq('id', id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } MS.pop(); drawModal(); toast('Marked out of service', 'ok'); loadAll(); }
+// Fires a push and never blocks or complains to the person who triggered it --
+// they did not ask to send a notification, so a failure here is quietly
+// logged, not shown as an error on top of whatever they were actually doing.
+function pushAlert(text) {
+  sb.functions.invoke('send-push', { body: { title: 'Great Bend Fire Department', body: text, aud_all: true } })
+    .then(r => { if (r.error) console.warn('Push alert failed:', r.error.message); })
+    .catch(e => console.warn('Push alert failed:', (e && e.message) || String(e)));
+}
+async function saveOOS(form) {
+  const fd = new FormData(form), id = form.dataset.id, reason = (fd.get('reason') || '').trim();
+  const rig = D.rigById[id];
+  const r = await sb.from('rigs').update({ status: 'out_of_service', oos_reason: reason, oos_since: today() }).eq('id', id);
+  if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+  MS.pop(); drawModal(); toast('Marked out of service', 'ok'); loadAll();
+  pushAlert(`${rig ? rig.unit : 'A rig'} is now out of service${reason ? ': ' + reason : ''}.`);
+}
 async function archiveRig(id) { if (!window.confirm('Archive this rig? It disappears from the list but every record stays.')) return; const r = await sb.from('rigs').update({ archived: true }).eq('id', id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } S.rigId = null; toast('Rig archived', 'ok'); loadAll(); }
 async function retireEq(id) {
   const e = D.eqById[id]; if (!e) return;
@@ -1080,6 +1098,17 @@ const RIGACTIONS = {
   'exp-defs': () => exportDefs(),
   'exp-members': () => exportMembers(),
   'exp-backup': () => exportFullBackup(),
+  'od-push': async el => {
+    const m = D.memById[el.dataset.id]; if (!m) return;
+    const btn = el; btn.disabled = true; btn.textContent = 'Sending…';
+    try {
+      const r = await sb.functions.invoke('send-push', { body: { title: 'Great Bend Fire Department', body: `${first(m.name)}, you have overdue or missing requirements. Check the app for details.`, member_id: m.id } });
+      if (r.error) { r.error.message = await functionErrorMessage(r.error); throw r.error; }
+      const d = r.data || {};
+      toast(d.sent ? `Reminder sent to ${m.name}` : (d.note || `${m.name} does not have notifications turned on.`), d.sent ? 'ok' : 'bad');
+    } catch (e) { toast('Could not send: ' + ((e && e.message) || String(e)), 'bad'); }
+    btn.disabled = false; btn.textContent = 'Push a reminder';
+  },
   'ev-new': () => { MS.push(() => evFormHtml(null)); drawModal(); evFormMount($('#modal-root')); },
   'ev-open': el => { MS.push(() => evDetailSheet(el.dataset.id)); drawModal(); },
   'ev-edit': el => { const e = S.events.find(x => x.id === el.dataset.id); if (e) { if (MS.length) MS.pop(); MS.push(() => evFormHtml(e)); drawModal(); evFormMount($('#modal-root')); } },
@@ -1102,7 +1131,15 @@ const RIGACTIONS = {
   },
   'ev-remove': async el => { const e = S.events.find(x => x.id === el.dataset.event); if (!e) return; const r = await setSignup(e.id, el.dataset.member, null); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast('Removed', 'ok'); loadAll(); },
   'ev-addwho': el => { MS.push(() => evAddSheet(el.dataset.id)); drawModal(); },
-  'ev-cancel': async el => { const e = S.events.find(x => x.id === el.dataset.id); if (!e) return; if (MS.length) { MS.pop(); drawModal(); } const r = await sb.from('events').update({ cancelled: !e.cancelled }).eq('id', e.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast(e.cancelled ? 'Event reopened' : 'Event cancelled', 'ok'); loadAll(); },
+  'ev-cancel': async el => {
+    const e = S.events.find(x => x.id === el.dataset.id); if (!e) return;
+    if (MS.length) { MS.pop(); drawModal(); }
+    const wasCancelling = !e.cancelled;
+    const r = await sb.from('events').update({ cancelled: wasCancelling }).eq('id', e.id);
+    if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; }
+    toast(wasCancelling ? 'Event cancelled' : 'Event reopened', 'ok'); loadAll();
+    if (wasCancelling) pushAlert(`Cancelled: ${e.title}, ${evWhen(e)}.`);
+  },
   'ev-del': async el => { const e = S.events.find(x => x.id === el.dataset.id); if (!e) return; if (!window.confirm('Delete this event? It disappears for everyone. Cancel it instead if people already signed up.')) return; if (MS.length) { MS.length = 0; drawModal(); } const r = await sb.from('events').update({ removed: true }).eq('id', e.id); if (r.error) { toast('Could not save: ' + r.error.message, 'bad'); return; } toast('Event deleted', 'ok'); loadAll(); },
   'ev-del-series': async el => {
     const series = el.dataset.series;
