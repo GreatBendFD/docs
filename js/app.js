@@ -365,6 +365,7 @@ function homeView() {
     <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${m.category ? 'Nothing is required for ' + esc(m.category) + ' members yet.' : 'No category is set on your record yet.'}</div>`}</div>
     ${homeEvents()}
     ${homeDuties()}
+    ${homeCaptainRigs()}
     ${homeAppStatus()}
     <p class="muted sm" style="margin-top:18px">Signed in as ${esc(session.user.email)}. Role: ${esc(roleLabel())}.</p>`;
 }
@@ -923,6 +924,8 @@ function rigFormHtml(r) {
       <label class="f"><span>Unit number</span><input name="unit" value="${esc(x.unit || '')}" required placeholder="24-1-1"></label>
       <label class="f"><span>Type</span><input name="type" value="${esc(x.type || '')}" placeholder="Engine, tanker, rescue…"></label>
       <label class="f"><span>Captain</span><input name="captain" value="${esc(x.captain || '')}"></label>
+      <label class="f"><span>Captain's account (optional)</span><select name="captain_member_id"><option value="">Not linked</option>${S.members.filter(m => m.status === 'active').sort((a, b) => a.name.localeCompare(b.name)).map(m => `<option value="${esc(m.id)}"${x.captain_member_id === m.id ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
+      <div class="muted sm" style="margin-top:-6px">Links this rig to their Home page, so they see what checks are due on it. Leave this blank if the captain doesn't have an account yet -- the name above still shows everywhere either way.</div>
       <div class="two"><label class="f"><span>Year</span><input name="year" type="number" value="${esc(x.year || '')}"></label><label class="f"><span>Make</span><input name="make" value="${esc(x.make || '')}"></label></div>
       <label class="f"><span>Model</span><input name="model" value="${esc(x.model || '')}"></label>
       <div class="two"><label class="f"><span>VIN</span><input name="vin" value="${esc(x.vin || '')}"></label><label class="f"><span>Plate</span><input name="plate" value="${esc(x.plate || '')}"></label></div>
@@ -936,7 +939,7 @@ async function saveRigForm(form) {
   const fd = new FormData(form), id = form.dataset.id || null;
   const unit = String(fd.get('unit') || '').trim(); if (!unit) { toast('Enter a unit number.', 'bad'); return; }
   const num = v => v === '' || v == null ? null : Number(v);
-  const data = { unit, type: (fd.get('type') || '').trim(), captain: (fd.get('captain') || '').trim(), year: num(fd.get('year')), make: (fd.get('make') || '').trim(), model: (fd.get('model') || '').trim(), vin: (fd.get('vin') || '').trim(), plate: (fd.get('plate') || '').trim(),
+  const data = { unit, type: (fd.get('type') || '').trim(), captain: (fd.get('captain') || '').trim(), captain_member_id: fd.get('captain_member_id') || null, year: num(fd.get('year')), make: (fd.get('make') || '').trim(), model: (fd.get('model') || '').trim(), vin: (fd.get('vin') || '').trim(), plate: (fd.get('plate') || '').trim(),
     purchase_date: fd.get('purchase_date') || null, purchase_date_unknown: !!fd.get('purchase_date_unknown') && !fd.get('purchase_date'),
     purchase_amount: num(fd.get('purchase_amount')), purchase_amount_unknown: !!fd.get('purchase_amount_unknown') && num(fd.get('purchase_amount')) === null,
     est_value: num(fd.get('est_value')), notes: (fd.get('notes') || '').trim() };
@@ -1159,7 +1162,7 @@ async function archiveItem(id, on) { const r = await sb.from('checklist_items').
 /* ---------- apparatus + equipment actions ---------- */
 const RIGACTIONS = {
   'goto-rigs': el => { S.tab = 'rigs'; S.rigId = el.dataset.rig || null; if (S.rigId) S.rsub = 'checks'; render(); window.scrollTo(0, 0); },
-  'rig-open': el => { S.rigId = el.dataset.id; S.rsub = 'checks'; render(); window.scrollTo(0, 0); },
+  'rig-open': el => { S.tab = 'rigs'; S.rigId = el.dataset.id; S.rsub = 'checks'; render(); window.scrollTo(0, 0); },
   'rig-back': () => { S.rigId = null; render(); window.scrollTo(0, 0); },
   rsub: el => { S.rsub = el.dataset.sub; render(); },
   'base-toggle': () => { S.showBase[S.rigId] = !S.showBase[S.rigId]; render(); },
@@ -2009,6 +2012,16 @@ function homeDuties() {
   const mine = S.duties.filter(d => d.active !== false && d.assigned_member_id === S.me.id).map(d => ({ d, x: dutyDueInfo(d) })).filter(o => o.x.state !== 'ok');
   if (!mine.length) return '';
   return `<div class="sec"><h3>Your duties</h3></div><div class="card list">${mine.map(o => `<div class="li"><div class="t"><b>${esc(o.d.title)}</b><span class="muted sm">${esc(freqLabel(o.d))}</span></div><div class="acts">${dutyDueChip(o.d)}<button class="btn sm" data-action="duty-done" data-id="${esc(o.d.id)}">Mark done</button></div></div>`).join('')}</div>`;
+}
+function homeCaptainRigs() {
+  if (!S.me || !S.perms.view_apparatus) return '';
+  const rigs = S.rigs.filter(r => !r.archived && r.captain_member_id === S.me.id);
+  if (!rigs.length) return '';
+  const rows = [];
+  for (const r of rigs) { const due = rigFlat(r.id).filter(it => isDue(it, r.id)); if (due.length) rows.push({ r, due }); }
+  if (!rows.length) return '';
+  return `<div class="sec"><h3>Your apparatus</h3><span class="muted sm">Checks due on the rig${rows.length > 1 ? 's' : ''} you captain.</span></div>
+    <div class="card list">${rows.map(o => `<div class="li"><div class="t"><button class="btn ghost" style="padding:0;min-height:0;justify-content:flex-start;font-weight:600;color:var(--ink);text-align:left" data-action="rig-open" data-id="${esc(o.r.id)}">${esc(o.r.unit)}</button><span class="muted sm">${o.due.length} ${plural(o.due.length, 'check')} due</span></div><div class="acts">${chip(o.due.length + ' due', 'warn')}</div></div>`).join('')}</div>`;
 }
 function dutyFormHtml(d) {
   const x = d || { freq: 'monthly', days: 30 };
