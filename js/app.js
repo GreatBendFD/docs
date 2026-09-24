@@ -1413,6 +1413,16 @@ const WEEKDAYS2 = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Frid
 const ORD2 = ['', 'first', 'second', 'third', 'fourth', 'fifth'];
 const fmt2 = s => pd(s).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 const fmtTime = t => { if (!t) return ''; const [a, b] = t.split(':').map(Number); return `${a % 12 || 12}:${pad(b)} ${a >= 12 ? 'PM' : 'AM'}`; };
+// A plain dropdown of fixed 15-minute times, rather than the browser's own
+// time picker: Safari's picker doesn't actually enforce a step -- it still
+// lets someone scroll to any minute -- so this is the only way to make the
+// 15-minute limit real on every phone, not just the ones whose browser
+// happens to honor it.
+function timeSelectOptions(selected) {
+  let opts = `<option value=""${selected ? '' : ' selected'}>No time set</option>`;
+  for (let h = 0; h < 24; h++) for (let m = 0; m < 60; m += 15) { const v = pad(h) + ':' + pad(m); opts += `<option value="${v}"${v === selected ? ' selected' : ''}>${fmtTime(v)}</option>`; }
+  return opts;
+}
 const evWhen = e => fmt(e.date) + (e.start_time ? ', ' + fmtTime(e.start_time) + (e.end_time ? ' to ' + fmtTime(e.end_time) : '') : '');
 function nthWeekdayOf(y, m0, wd, nth) {
   if (nth === 0) { const last = new Date(y, m0 + 1, 0); const diff = (last.getDay() - wd + 7) % 7; return iso(new Date(y, m0, last.getDate() - diff)); }
@@ -1548,7 +1558,7 @@ function evFormHtml(e) {
     <div class="sheet-b"><form id="f-ev" class="form" data-id="${esc(x.id || '')}">
       <label class="f"><span>Title</span><input name="title" value="${esc(x.title || '')}" required placeholder="Monthly meeting, hose testing, parade detail"></label>
       <div class="two"><label class="f"><span>Type</span><input name="category" list="dl-evcat" value="${esc(x.category || '')}"></label><label class="f"><span>Date</span><input name="date" type="date" value="${esc(x.date || today())}" required></label></div>
-      <div class="two"><label class="f"><span>Starts</span><input name="start_time" type="time" step="900" value="${esc(x.start_time || '')}"></label><label class="f"><span>Ends</span><input name="end_time" type="time" step="900" value="${esc(x.end_time || '')}"></label></div>
+      <div class="two"><label class="f"><span>Starts</span><select name="start_time">${timeSelectOptions(x.start_time || '')}</select></label><label class="f"><span>Ends</span><select name="end_time">${timeSelectOptions(x.end_time || '')}</select></label></div>
       <label class="f"><span>Where</span><input name="location" value="${esc(x.location !== undefined ? x.location : 'Station 24')}"></label>
       <label class="f"><span>Details</span><textarea name="description" placeholder="What to bring, who to contact">${esc(x.description || '')}</textarea></label>
       <label class="f"><span>If this is a training, it satisfies</span><select name="req"><option value="">Nothing in particular</option>${S.reqs.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0)).map(r => `<option value="${esc(r.id)}"${x.satisfies_requirement_id === r.id ? ' selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
@@ -1871,8 +1881,8 @@ function drawModal() {
 /* ---------- data ---------- */
 const cfgOk = () => { const c = window.GBFD_CONFIG || {}; return !!(c.SUPABASE_URL && c.SUPABASE_KEY) && !/YOUR-/.test(c.SUPABASE_URL + c.SUPABASE_KEY); };
 
-async function loadAll() {
-  S.loading = true; S.error = ''; render();
+async function loadAll(isRetry) {
+  if (!isRetry) { S.loading = true; S.error = ''; render(); }
   try {
     const uid = session.user.id;
     const [m, rq, st, ms, ds] = await Promise.all([
@@ -1926,7 +1936,17 @@ async function loadAll() {
       for (const r of [tr, at]) if (r.error) throw r.error;
       S.trainings = tr.data || []; S.attendanceRows = at.data || [];
     } else { S.trainings = []; S.attendanceRows = []; }
-  } catch (e) { S.error = (e && e.message) || String(e); }
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    // A device whose clock reads a little behind real time can make a
+    // freshly issued sign-in token look like it was issued in the future.
+    // That clears up within a second or two on its own -- the person
+    // should not have to tap "Try again" for something that fixes itself.
+    // Retried silently, once; a second failure falls through to the normal
+    // error banner rather than retrying forever.
+    if (!isRetry && /issued at future/i.test(msg)) { setTimeout(() => loadAll(true), 1500); return; }
+    S.error = msg;
+  }
   S.loading = false; derive(); render();
 }
 
