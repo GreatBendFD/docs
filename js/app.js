@@ -402,11 +402,14 @@ function memSheet(id) {
   const m = D.memById[id]; if (!m) return '';
   const canSee = S.perms.view_roster || S.perms.manage_training || m.id === S.me.id;
   const rows = canSee ? reqRows(m) : [];
+  const myTrainings = canSee ? S.trainings.filter(t => (D.attendance[t.id] || []).includes(m.id)).sort((a, b) => (b.date || '').localeCompare(a.date || '')) : [];
   return `<div class="sheet-h"><div><h2>${esc(m.name)}</h2></div><button class="x" data-action="m-close" aria-label="Close">×</button></div>
     <div class="sheet-b"><div class="rc-chips" style="margin-bottom:12px">${chip(m.category || 'No category')}${rankOf(m) ? chip(rankOf(m)) : ''}${probChip(m)}</div>
       ${m.joined || probInfo(m) ? `<div class="sm muted" style="margin:-4px 0 12px">${m.joined ? 'Joined ' + esc(fmt(m.joined)) + (tenure(m.joined) ? ' (' + esc(tenure(m.joined)) + '). ' : '. ') : ''}${esc(probLine(m))}</div>` : ''}
       <div class="sec" style="margin-top:0"><h3>Requirements</h3></div>
-      <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${canSee ? 'Nothing is required yet.' : 'You can see the directory but not training records.'}</div>`}</div></div>
+      <div class="card list">${rows.length ? rows.map(x => reqLine(x, m.id)).join('') : `<div class="empty">${canSee ? 'Nothing is required yet.' : 'You can see the directory but not training records.'}</div>`}</div>
+      ${canSee ? `<div class="sec"><h3>Training history</h3></div><div class="card list">${myTrainings.length ? myTrainings.map(t => `<div class="li"><div class="t"><b>${esc(t.title)}</b><span class="muted sm">${esc(fmt(t.date))}${t.hours ? ', ' + t.hours + ' ' + plural(Number(t.hours), 'hour') : ''}${t.instructor ? ', taught by ' + esc(t.instructor) : ''}</span></div></div>`).join('') : '<div class="empty">No trainings recorded yet.</div>'}</div>` : ''}
+    </div>
     <div class="sheet-f"><button class="btn" data-action="m-close">Close</button>${S.perms.admin_setup ? `<button class="btn danger" data-action="mem-delete" data-id="${esc(id)}">Delete</button>` : ''}${S.perms.manage_members && id !== (S.me && S.me.id) ? `<button class="btn" data-action="mem-invite" data-id="${esc(id)}">${m.user_id ? 'Resend invite' : 'Send invite'}</button>` : ''}${S.perms.manage_members ? `<button class="btn primary" data-action="mem-edit" data-id="${esc(id)}">Edit</button>` : ''}</div>`;
 }
 async function sendOneInvite(id) {
@@ -1175,6 +1178,7 @@ const RIGACTIONS = {
   'exp-defs': () => exportDefs(),
   'exp-members': () => exportMembers(),
   'exp-backup': () => exportFullBackup(),
+  'exp-training': () => exportTrainings(),
   'od-push': async el => {
     const m = D.memById[el.dataset.id]; if (!m) return;
     const btn = el; btn.disabled = true; btn.textContent = 'Sending…';
@@ -1293,6 +1297,16 @@ async function exportMembers() {
     toast('Export ready', 'ok');
   } catch (e) { toast('Could not export: ' + ((e && e.message) || String(e)), 'bad'); }
 }
+function exportTrainings() {
+  const rows = [['Date', 'Title', 'Hours', 'Instructor', 'Topic', 'Satisfies', 'Attendees', 'Notes']];
+  const reqById = REQ_FREQ_LOOKUP();
+  for (const t of S.trainings.slice().sort((a, b) => (a.date || '').localeCompare(b.date || ''))) {
+    const names = (D.attendance[t.id] || []).map(mid => (D.memById[mid] || {}).name).filter(Boolean).sort((a, b) => a.localeCompare(b));
+    const rq = t.satisfies_requirement_id ? reqById[t.satisfies_requirement_id] : null;
+    rows.push([t.date, t.title, t.hours, t.instructor, t.topic, rq ? rq.name : '', names.join('; '), t.notes]);
+  }
+  downloadText(`training-${today()}.csv`, csvOf(rows));
+}
 async function exportFullBackup() {
   toast('Preparing backup…');
   try {
@@ -1303,7 +1317,9 @@ async function exportFullBackup() {
     const backup = {
       exported_at: new Date().toISOString(),
       rigs: S.rigs, equipment: S.equipment, checklist_items: S.items, check_sessions: S.sessions, check_results: S.results, deficiencies: S.defs,
-      members: S.members, member_private: priv.data, member_access: access.data, requirements: S.reqs, member_records: S.records, messages: S.messages, audit_log: audit.data
+      members: S.members, member_private: priv.data, member_access: access.data, requirements: S.reqs, member_records: S.records, messages: S.messages, audit_log: audit.data,
+      trainings: S.trainings, training_attendance: S.attendanceRows, events: S.events, event_signups: S.signups, event_attendance: S.eventAttendanceRows,
+      board_threads: S.threads, board_replies: S.replies
     };
     downloadText(`gbfd-backup-${today()}.json`, JSON.stringify(backup, null, 2), 'application/json');
     toast('Backup ready', 'ok');
@@ -1401,7 +1417,7 @@ function recordsView() {
   const groups = S.audit ? groupAuditLog(S.audit) : null;
   return `<div class="head-row"><h1>Records</h1></div>
     <div class="card pad" style="margin-bottom:14px"><h3>Exports</h3><p class="muted sm" style="margin:4px 0 12px">Spreadsheet files for anyone who asks to see your records, plus a full backup you can keep.</p>
-      <div class="row"><button class="btn" data-action="exp-rigs">Rigs</button><button class="btn" data-action="exp-equipment">Equipment</button><button class="btn" data-action="exp-checks">Check history</button><button class="btn" data-action="exp-defs">Deficiencies</button><button class="btn" data-action="exp-members">Members</button><button class="btn primary" data-action="exp-backup">Full backup</button></div></div>
+      <div class="row"><button class="btn" data-action="exp-rigs">Rigs</button><button class="btn" data-action="exp-equipment">Equipment</button><button class="btn" data-action="exp-checks">Check history</button><button class="btn" data-action="exp-defs">Deficiencies</button><button class="btn" data-action="exp-members">Members</button><button class="btn" data-action="exp-training">Training</button><button class="btn primary" data-action="exp-backup">Full backup</button></div></div>
     <div class="card pad" style="margin-bottom:14px"><h3>Invite members</h3><p class="muted sm" style="margin:4px 0 12px">Choose who gets a sign-in invite. Needs custom SMTP set up first (see the README) -- without it, invites will not reach anyone outside your Supabase organization.</p>
       <button class="btn primary" data-action="invite-members">Invite members…</button></div>
     <div class="sec"><h3>Change log</h3><span class="muted sm">Who changed what, newest first. A run of the same change by the same person is shown as one line.</span></div>
@@ -1508,11 +1524,11 @@ function evDetailSheet(id) {
       ${action ? `<div class="row">${action}</div>` : ''}</div>`;
   }).join('');
   const satRq = e.satisfies_requirement_id ? S.reqs.find(r => r.id === e.satisfies_requirement_id) : null;
-  const attCount = (D.evAttendance[id] || []).length;
+  const attNames = (D.evAttendance[id] || []).map(mid => (D.memById[mid] || {}).name).filter(Boolean).sort((a, b) => a.localeCompare(b));
   const body = `<div class="rc-chips" style="margin-bottom:10px">${chip(e.category || 'Event')}${e.cancelled ? chip('Cancelled', 'bad') : past ? chip('Past') : ''}${mine && !e.cancelled ? chip('You are signed up', 'ok') : ''}${satRq ? chip('Satisfies ' + satRq.name) : ''}</div>
     <div class="card pad stack" style="gap:4px"><b>${esc(evWhen(e))}</b>${e.location ? `<span>${esc(e.location)}</span>` : ''}${e.description ? `<span class="muted" style="white-space:pre-wrap;margin-top:6px">${esc(e.description)}</span>` : ''}</div>
     ${!m && !mgr ? '<div class="banner" style="margin-top:10px">Your sign-in is not linked to a member record, so you cannot sign up yet. Ask an administrator to link it.</div>' : ''}
-    ${satRq && S.perms.manage_training ? `<div class="card pad spread" style="margin-top:10px"><span>${attCount ? attCount + ' marked present' : 'Nobody marked present yet'}. Attending completes ${esc(satRq.name)} for them.</span><button class="btn sm" data-action="ev-att" data-id="${esc(id)}">Take attendance</button></div>` : ''}
+    ${S.perms.manage_training ? `<div class="card pad stack" style="gap:8px;margin-top:10px"><div class="spread"><b>Attendance</b><button class="btn sm" data-action="ev-att" data-id="${esc(id)}">Take attendance</button></div>${satRq ? `<span class="muted sm">Attending completes ${esc(satRq.name)} for them.</span>` : ''}<div class="who">${attNames.length ? attNames.map(n => `<span class="chip">${esc(n)}</span>`).join('') : '<span class="muted sm">Nobody marked present yet.</span>'}</div></div>` : ''}
     <div class="sec"><h3>Who is needed</h3></div><div class="stack">${slots || '<div class="card empty">No signup slots for this event.</div>'}</div>`;
   const foot = `<button class="btn" data-action="m-close">Close</button>${mgr ? `<button class="btn" data-action="copy" data-v="${esc(evText(e))}">Copy list</button>${!past && !e.cancelled ? `<button class="btn" data-action="ev-addwho" data-id="${esc(id)}">Add someone</button>` : ''}<button class="btn primary" data-action="ev-edit" data-id="${esc(id)}">Edit</button>` : ''}`;
   return sheet(esc(e.title), body, foot);
