@@ -368,12 +368,13 @@ function memberCard(m) {
   const canSee = S.perms.view_roster || S.perms.manage_training;
   const rows = canSee ? reqRows(m) : [], bad = rows.filter(needsAttn).length, soon = rows.filter(x => x.state === 'soon').length;
   const comp = !canSee || m.status === 'inactive' ? '' : !rows.length ? chip('No requirements') : bad ? chip(bad + ' overdue or missing', 'bad') : soon ? chip(soon + ' due soon', 'warn') : chip('All current', 'ok');
-  return `<button class="card eqcard${m.status === 'inactive' ? ' retired' : ''}" data-action="mem-open" data-id="${esc(m.id)}"><span class="top2"><b>${esc(m.name)}</b>${chip(m.category || 'No category')}</span><span class="muted sm">${esc(rankOf(m)) || '&nbsp;'}</span><span class="rc-chips">${m.status === 'inactive' ? chip('Inactive', 'bad') : ''}${probChip(m)}${comp}</span></button>`;
+  const rank = esc(rankOf(m));
+  return `<div class="li${m.status === 'inactive' ? ' off' : ''}"><div class="t"><button class="btn ghost" style="padding:0;min-height:0;justify-content:flex-start;font-weight:600;color:var(--ink);text-align:left" data-action="mem-open" data-id="${esc(m.id)}">${esc(m.name)}</button><span class="muted sm">${rank}${rank && m.category ? ' -- ' : ''}${esc(m.category || (rank ? '' : 'No category'))}</span></div><div class="acts">${m.status === 'inactive' ? chip('Inactive', 'bad') : ''}${probChip(m)}${comp}</div></div>`;
 }
 function memList() {
   const q = S.q.trim().toLowerCase();
   const list = S.members.filter(m => m.status !== 'inactive' && (!q || (m.name + ' ' + rankOf(m) + ' ' + (m.title || '')).toLowerCase().includes(q))).sort((a, b) => a.name.localeCompare(b.name));
-  return list.length ? `<div class="eqlist">${list.map(memberCard).join('')}</div>` : '<div class="card empty">Nobody matches.</div>';
+  return list.length ? `<div class="card list">${list.map(memberCard).join('')}</div>` : '<div class="card empty">Nobody matches.</div>';
 }
 function rosterView() {
   const active = S.members.filter(m => m.status !== 'inactive');
@@ -817,16 +818,13 @@ function rigChecksTab(r) {
 function eqCard(e) {
   const items = S.items.filter(i => i.scope_type === 'equipment' && i.equipment_id === e.id && i.active !== false);
   const due = items.filter(it => isDue(it, e.id)).length;
-  return `<button class="card eqcard${e.status === 'retired' ? ' retired' : ''}" data-action="eq-open" data-id="${esc(e.id)}">
-    <span class="top2"><b>${esc(e.name)}</b>${chip(whereLabel2(e))}</span>
-    <span class="muted sm">${esc([e.category, e.location].filter(Boolean).join(', ')) || '&nbsp;'}</span>
-    <span class="rc-chips">${e.status === 'retired' ? chip('Retired') : e.status === 'out_of_service' ? chip('Out of service', 'bad') : ''}${purchaseChip(e)}${due ? chip(`${due} ${plural(due, 'check')} due`, 'warn') : ''}</span></button>`;
+  return `<div class="li${e.status === 'retired' ? ' off' : ''}"><div class="t"><button class="btn ghost" style="padding:0;min-height:0;justify-content:flex-start;font-weight:600;color:var(--ink);text-align:left" data-action="eq-open" data-id="${esc(e.id)}">${esc(e.name)}</button><span class="muted sm">${esc([whereLabel2(e), e.category, e.location].filter(Boolean).join(', '))}</span></div><div class="acts">${e.status === 'retired' ? chip('Retired') : e.status === 'out_of_service' ? chip('Out of service', 'bad') : ''}${purchaseChip(e)}${due ? chip(`${due} ${plural(due, 'check')} due`, 'warn') : ''}</div></div>`;
 }
 function rigEquipTab(r) {
   const list = S.equipment.filter(e => e.assigned_type === 'rig' && e.assigned_rig_id === r.id && e.status !== 'retired').sort((a, b) => a.name.localeCompare(b.name));
   const tt = eqTotals(list);
   return `<div class="head-row"><div><b>${list.length} ${plural(list.length, 'item')}</b> <span class="muted">worth ${money(tt.sum)} at purchase${totalsNote(tt)}</span></div>${S.perms.edit_equipment ? `<button class="btn primary" data-action="eq-new" data-assigned="${esc(r.id)}">Add equipment</button>` : ''}</div>
-    ${list.length ? `<div class="eqlist">${list.map(eqCard).join('')}</div>` : '<div class="card empty">No equipment is assigned here yet.</div>'}`;
+    ${list.length ? `<div class="card list">${list.map(eqCard).join('')}</div>` : '<div class="card empty">No equipment is assigned here yet.</div>'}`;
 }
 function defCard(d) {
   const r = d.rig_id ? D.rigById[d.rig_id] : null;
@@ -889,7 +887,7 @@ function eqList() {
   if (f.cat !== 'all') list = list.filter(e => e.category === f.cat);
   if (q) list = list.filter(e => [e.name, e.serial, e.category, e.location, e.make_model, e.notes].join(' ').toLowerCase().includes(q));
   list.sort((a, b) => a.name.localeCompare(b.name));
-  return list.length ? `<div class="eqlist">${list.map(eqCard).join('')}</div>` : `<div class="card empty">${S.equipment.length ? 'Nothing matches those filters.' : 'No equipment yet.'}</div>`;
+  return list.length ? `<div class="card list">${list.map(eqCard).join('')}</div>` : `<div class="card empty">${S.equipment.length ? 'Nothing matches those filters.' : 'No equipment yet.'}</div>`;
 }
 function eqDetailSheet(id) {
   const e = D.eqById[id]; if (!e) return sheet('Equipment', '<div class="empty">This item no longer exists.</div>', '<button class="btn" data-action="m-close">Close</button>');
@@ -1452,12 +1450,12 @@ function slotElig(s) {
 }
 function evCard(e) {
   const st = evStatus(e), mine = myEntry(e);
-  return `<button class="card eqcard${e.cancelled ? ' retired' : ''}" data-action="ev-open" data-id="${esc(e.id)}"><span class="top2"><b>${esc(e.title)}</b>${chip(e.category || 'Event')}</span><span class="muted sm">${esc(evWhen(e))}</span><span class="sm">${esc(e.location || '') || '&nbsp;'}</span><span class="rc-chips">${e.cancelled ? chip('Cancelled', 'bad') : st.need ? chip(`${st.filled} of ${st.need} filled`, st.filled >= st.need ? 'ok' : 'warn') : ''}${mine && !e.cancelled ? chip('You are signed up', 'ok') : ''}</span></button>`;
+  return `<div class="li${e.cancelled ? ' off' : ''}"><div class="t"><button class="btn ghost" style="padding:0;min-height:0;justify-content:flex-start;font-weight:600;color:var(--ink);text-align:left" data-action="ev-open" data-id="${esc(e.id)}">${esc(e.title)}</button><span class="muted sm">${esc(evWhen(e))}${e.location ? ', ' + esc(e.location) : ''}</span></div><div class="acts">${chip(e.category || 'Event')}${e.cancelled ? chip('Cancelled', 'bad') : st.need ? chip(`${st.filled} of ${st.need} filled`, st.filled >= st.need ? 'ok' : 'warn') : ''}${mine && !e.cancelled ? chip('You are signed up', 'ok') : ''}</div></div>`;
 }
 function homeEvents() {
   const t = today(); const list = S.events.filter(e => !e.removed && !e.cancelled && e.date >= t).sort((a, b) => (a.date + (a.start_time || '')).localeCompare(b.date + (b.start_time || ''))).slice(0, 3);
   if (!list.length) return '';
-  return `<div class="sec"><div class="spread"><h3>Upcoming events</h3><button class="btn ghost sm" data-action="tab" data-tab="events">See all</button></div></div><div class="eqlist">${list.map(evCard).join('')}</div>`;
+  return `<div class="sec"><div class="spread"><h3>Upcoming events</h3><button class="btn ghost sm" data-action="tab" data-tab="events">See all</button></div></div><div class="card list">${list.map(evCard).join('')}</div>`;
 }
 function calHtml() {
   const f = S.ev; const [y, mo] = f.month.split('-').map(Number); const lead = new Date(y, mo - 1, 1).getDay(), dim = new Date(y, mo, 0).getDate(), t = today();
@@ -1471,7 +1469,7 @@ function eventsList() {
   const f = S.ev, t = today();
   let list = S.events.filter(e => !e.removed).slice().sort((a, b) => (a.date + (a.start_time || '')).localeCompare(b.date + (b.start_time || '')));
   if (f.day) list = list.filter(e => e.date === f.day); else if (!f.past) list = list.filter(e => e.date >= t); else list = list.reverse();
-  return list.length ? `<div class="eqlist">${list.map(evCard).join('')}</div>` : `<div class="card empty">${f.day ? 'Nothing on this day.' : 'No events coming up.'}</div>`;
+  return list.length ? `<div class="card list">${list.map(evCard).join('')}</div>` : `<div class="card empty">${f.day ? 'Nothing on this day.' : 'No events coming up.'}</div>`;
 }
 function eventsView() {
   const f = S.ev; if (!f.month) f.month = today().slice(0, 7);
@@ -1740,8 +1738,8 @@ function boardHasUnread(board) {
 function boardListView() {
   const counts = boardCounts();
   return `<div class="head-row"><h1>Message board</h1></div>
-    <div class="eqlist">${BOARDS.map(b => { const c = counts[b]; const unread = boardHasUnread(b);
-      return `<button class="card eqcard" data-action="brd-open" data-board="${esc(b)}"><span class="top2"><b>${esc(b)}</b>${unread ? chip('New', 'warn') : ''}</span><span class="muted sm">${c.threads} ${plural(c.threads, 'thread')}</span><span class="sm">${c.latest ? 'Last activity ' + timeAgo(c.latest) : 'Nothing posted yet'}</span></button>`; }).join('')}</div>`;
+    <div class="card list">${BOARDS.map(b => { const c = counts[b]; const unread = boardHasUnread(b);
+      return `<div class="li"><div class="t"><button class="btn ghost" style="padding:0;min-height:0;justify-content:flex-start;font-weight:600;color:var(--ink);text-align:left" data-action="brd-open" data-board="${esc(b)}">${esc(b)}</button><span class="muted sm">${c.threads} ${plural(c.threads, 'thread')}${c.latest ? ', last activity ' + timeAgo(c.latest) : ''}</span></div><div class="acts">${unread ? chip('New', 'warn') : ''}</div></div>`; }).join('')}</div>`;
 }
 function threadListHtml(board) {
   const list = S.threads.filter(t => t.board === board && !t.removed).sort((a, b) => (b.pinned - a.pinned) || (b.updated_at || '').localeCompare(a.updated_at || ''));
